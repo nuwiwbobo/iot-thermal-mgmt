@@ -1,0 +1,42 @@
+<h2>System Architecture Approaches</h2>
+<p class="subtitle">Three ways to structure the ESP32 thermal management firmware</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>FreeRTOS Task-Based (Recommended)</h3>
+      <p>Separate RTOS tasks for TempSensor, FanControl, WebServer, ButtonHandler. Queue-based inter-task communication. Timer for sampling rate.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Clean separation of concerns</li><li>No delay() — pure non-blocking</li><li>Easy to debug per-task</li><li>Web server stays responsive</li><li>Scales well for capstone</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>More code boilerplate</li><li>Shared data needs mutex</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Super-Loop + Timer Callbacks</h3>
+      <p>Main loop() handles web server polling. ESP timer callbacks for temp sampling and fan control. Simple state machine for modes.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Simpler code structure</li><li>Lower memory overhead</li><li>Good for smaller projects</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>Web server can block</li><li>Timer conflicts at high freq</li><li>Harder to extend later</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Event-Driven with State Machine</h3>
+      <p>Central event queue. Components emit events (temp_reading, button_press, web_command). State machine governs transitions between idle/cooling/manual/error.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Very predictable behavior</li><li>Easy to add new events</li><li>Great for safety-critical logic</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>Most complex to implement</li><li>Event queue can overflow</li><li>Overkill for this scope</li></ul></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:2rem">Click an option above to select. I recommend <strong>Approach A (RTOS Tasks)</strong> — it's the cleanest for a capstone: each subsystem is independently testable, the web server stays responsive via its own task, and the structure maps directly to your report's architecture section.</p>
