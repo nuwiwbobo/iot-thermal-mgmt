@@ -1,0 +1,55 @@
+flowchart TB
+    subgraph ESP32["ESP32 Dev Board"]
+        GPIO21_SDA
+        GPIO22_SCL
+        GPIO16
+        GPIO17
+        GPIO18
+        GPIO4
+        GPIO5
+        VIN
+        GND
+    end
+
+    subgraph BMP280["BMP280 Temperature Sensor"]
+        BMP_VCC["VCC"]
+        BMP_GND["GND"]
+        BMP_SDA["SDA"]
+        BMP_SCL["SCL"]
+    end
+
+    subgraph L298N["L298N Motor Driver"]
+        L298N_VS["VS"]
+        L298N_GND["GND"]
+        L298N_5V["5V Regulator"]
+        L298N_ENA["ENA"]
+        L298N_IN1["IN1"]
+        L298N_IN2["IN2"]
+        L298N_OUT1["OUT1"]
+        L298N_OUT2["OUT2"]
+    end
+
+    BATT["3S Li-ion Battery 12V"]
+    FAN["12V DC Fan"]
+    BTN1["Mode Button (GPIO4)"]
+    BTN2["Value Button (GPIO5)"]
+
+    GPIO21_SDA --> BMP_SDA
+    GPIO22_SCL --> BMP_SCL
+    L298N_IN1 --> GPIO17
+    L298N_IN2 --> GPIO18
+    L298N_ENA --> GPIO16
+    BTN1 --> GPIO4
+    BTN2 --> GPIO5
+    GPIO4 --> GND
+    GPIO5 --> GND
+    VIN --> L298N_5V
+    L298N_GND --> GND
+    BMP_GND --> GND
+    GND --> L298N_GND
+
+    BMP_VCC --> ESP32["3.3V"]
+    L298N_VS --> BATT
+    L298N_GND --> BATT
+    L298N_OUT1 --> FAN
+    L298N_OUT2 --> FAN

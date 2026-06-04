@@ -34,7 +34,7 @@ static esp_err_t api_status_handler(httpd_req_t* req) {
     snprintf(buf, sizeof(buf),
         "{\"temp\":%.1f,\"fan\":%u,\"mode\":%d,\"setpoint\":%.1f,"
         "\"wifi\":\"%s\",\"uptime\":%lld}",
-        g_temp_c, g_fan_pwm, g_mode, g_setpoint,
+        g_temp_c, g_fan_pwm * 100 / PWM_MAX, g_mode, g_setpoint,
         network_get_mode_str(), (long long)(uptime_us / 1000000));
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, strlen(buf));
@@ -47,12 +47,36 @@ static esp_err_t api_control_handler(httpd_req_t* req) {
     if (len <= 0) return ESP_FAIL;
     buf[len] = 0;
 
-    if (strstr(buf, "\"mode\":0")) { g_mode = 0; actuator_set_mode(MODE_AUTO); }
-    if (strstr(buf, "\"mode\":1")) { g_mode = 1; actuator_set_mode(MODE_MANUAL); }
+    // Handle Mode explicitly
+    if (strstr(buf, "\"mode\":0")) { 
+        g_mode = 0; 
+        actuator_set_mode(MODE_AUTO); 
+    }
+    if (strstr(buf, "\"mode\":1")) { 
+        g_mode = 1; 
+        actuator_set_mode(MODE_MANUAL); 
+    }
+
+    // Handle Setpoint
     char* sp = strstr(buf, "\"setpoint\":");
-    if (sp) { g_setpoint = atof(sp + 11); actuator_set_setpoint(g_setpoint); }
+    if (sp) { 
+        g_setpoint = atof(sp + 11); 
+        actuator_set_setpoint(g_setpoint); 
+    }
+
+    // Handle Fan Speed
     char* fp = strstr(buf, "\"fan\":");
-    if (fp) { g_fan_pwm = atoi(fp + 6); actuator_set_pwm(g_fan_pwm); }
+    if (fp) {
+        int pct = atoi(fp + 6);
+        if (pct > 100) pct = 100;
+        if (pct < 0) pct = 0;
+        g_fan_pwm = (uint8_t)(pct * PWM_MAX / 100);
+        actuator_set_pwm(g_fan_pwm);
+        
+        // FIX: If the user changes the fan speed, force MANUAL mode!
+        g_mode = 1; 
+        actuator_set_mode(MODE_MANUAL);
+    }
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"ok\":true}", 11);
@@ -60,9 +84,12 @@ static esp_err_t api_control_handler(httpd_req_t* req) {
 }
 
 static esp_err_t api_log_csv_handler(httpd_req_t* req) {
-    char* csv = malloc(4096);
-    if (!csv) return ESP_FAIL;
-    int len = storage_get_csv(csv, 4096);
+    char* csv = malloc(8192); // Increased to prevent truncation
+    if (!csv) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    int len = storage_get_csv(csv, 8192); // Update size here too
     httpd_resp_set_type(req, "text/csv");
     httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=log.csv");
     httpd_resp_send(req, csv, len);
@@ -110,7 +137,7 @@ static void start_ap(void) {
             .authmode = WIFI_AUTH_WPA_WPA2_PSK,
         },
     };
-    esp_wifi_set_mode(WIFI_MODE_AP);
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
     esp_wifi_set_config(WIFI_IF_AP, &wifi_ap_cfg);
     ESP_LOGI(TAG, "AP started: %s", WIFI_AP_SSID);
 }

@@ -8,6 +8,7 @@ static bool btn_mode_last = true;
 static bool btn_val_last = true;
 static int64_t btn_val_press_start = 0;
 static bool btn_val_handled = false;
+static int64_t btn_mode_debounce = 0;
 
 void input_init(btn_callback_t cb) {
     user_cb = cb;
@@ -22,19 +23,23 @@ void input_init(btn_callback_t cb) {
 void input_scan(void) {
     bool mode_now = gpio_get_level(BTN_MODE_GPIO);
     bool val_now = gpio_get_level(BTN_VAL_GPIO);
+    int64_t now = esp_timer_get_time() / 1000;
 
     if (mode_now == 0 && btn_mode_last == 1) {
-        if (user_cb) user_cb(0, false);
+        if (now - btn_mode_debounce > DEBOUNCE_MS) {
+            if (user_cb) user_cb(0, false);
+            btn_mode_debounce = now;
+        }
     }
     btn_mode_last = mode_now;
 
     if (val_now == 0 && btn_val_last == 1) {
-        btn_val_press_start = esp_timer_get_time() / 1000;
+        btn_val_press_start = now;
         btn_val_handled = false;
     }
 
     if (val_now == 0 && !btn_val_handled) {
-        int64_t elapsed = (esp_timer_get_time() / 1000) - btn_val_press_start;
+        int64_t elapsed = now - btn_val_press_start;
         if (elapsed >= LONG_PRESS_MS) {
             if (user_cb) user_cb(BTN_ADJUST_COARSE, true);
             btn_val_handled = true;

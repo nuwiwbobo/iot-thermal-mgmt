@@ -10,6 +10,7 @@ static int ring_head = 0;
 static int ring_count = 0;
 static uint32_t sample_counter = 0;
 static bool spiffs_mounted = false;
+static uint32_t last_flushed_sample = 0;
 
 void storage_init(void) {
     esp_vfs_spiffs_conf_t conf = {
@@ -48,7 +49,7 @@ int storage_get_csv(char* buf, int max_len) {
         pos += snprintf(buf + pos, max_len - pos,
             "%lu, %llu, %.1f, %u, %s, %.1f\n",
             (unsigned long)e->sample, (unsigned long long)e->timestamp_ms,
-            e->temp_c, e->fan_pwm, e->mode, e->setpoint);
+            e->temp_c, (unsigned)(e->fan_pwm * 100 / PWM_MAX), e->mode, e->setpoint);
     }
     return pos;
 }
@@ -72,18 +73,27 @@ void storage_clear(void) {
 }
 
 void storage_flush(void) {
-    if (!spiffs_mounted) return;
-    FILE* f = fopen("/spiffs" LOG_FILE, "w");
+    if (!spiffs_mounted || ring_count == 0) return;
+    
+    // Open in "a" (append) mode!
+    FILE* f = fopen("/spiffs" LOG_FILE, "a");
     if (!f) return;
+    
     char buf[128];
     int start = (ring_head - ring_count + LOG_RING_SIZE) % LOG_RING_SIZE;
+    
     for (int i = 0; i < ring_count; i++) {
         log_entry_t* e = &ring[(start + i) % LOG_RING_SIZE];
-        snprintf(buf, sizeof(buf),
-            "%lu, %llu, %.1f, %u, %s, %.1f\n",
-            (unsigned long)e->sample, (unsigned long long)e->timestamp_ms,
-            e->temp_c, e->fan_pwm, e->mode, e->setpoint);
-        fputs(buf, f);
+        
+        // ONLY write samples we haven't flushed yet!
+        if (e->sample >= last_flushed_sample) {
+            snprintf(buf, sizeof(buf),
+                "%lu, %llu, %.1f, %u, %s, %.1f\n",
+                (unsigned long)e->sample, (unsigned long long)e->timestamp_ms,
+                e->temp_c, (unsigned)(e->fan_pwm * 100 / PWM_MAX), e->mode, e->setpoint);
+            fputs(buf, f);
+            last_flushed_sample = e->sample + 1;
+        }
     }
     fclose(f);
 }

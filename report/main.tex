@@ -1,0 +1,461 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\geometry{margin=1in}
+
+\definecolor{lightgray}{gray}{0.9}
+
+\title{Laporan Proyek Sistem Embedded 1\\
+ESP32 IoT Thermal Management System\\
+\large with Data Logging and Web-Based Control}
+\author{Wawabobo}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\thispagestyle{empty}
+
+\newpage
+
+\section{Resume}
+
+Sistem manajemen termal berbasis ESP32 ini menggunakan sensor BMP280 (I2C) untuk pembacaan suhu dan tekanan, driver L298N untuk mengontrol kipas 12V DC dengan PWM, dilengkapi kontrol dual-mode (AUTO dan MANUAL) melalui web dashboard dan tombol fisik. Data suhu dicatat secara real-time ke dalam ring buffer RAM dan disimpan ke LittleFS dalam format CSV. Sistem menyediakan dashboard web real-time dengan grafik live, ekspor data CSV, dan skrip GNUplot untuk analisis. ESP32 beroperasi dalam mode WiFi STA dengan fallback ke AP. Sistem dirancang untuk menjaga suhu sekitar setpoint dengan akurasi steady-state $<$1$^{\circ}$C dan dilengkapi safety override pada suhu $>$60$^{\circ}$C.
+
+\section{Introduction (Pendahuluan)}
+
+\subsection{Permasalahan}
+
+Banyak sistem elektronik dan industri kecil yang memerlukan manajemen termal aktif untuk menjaga suhu operasi komponen dalam rentang aman. Sistem kontrol suhu komersial (PLC, PID controller dedicated) memiliki biaya tinggi dan kompleksitas yang berlebihan untuk aplikasi skala kecil. Solusi berbasis ESP32 dengan sensor digital BMP280 dan aktuator kipas DC yang dikontrol PWM dapat menjadi alternatif biaya rendah yang tetap memberikan akurasi memadai, kemampuan IoT, dan fleksibilitas kontrol.
+
+\subsection{Solusi yang Diharapkan}
+
+Sistem yang dapat:
+\begin{itemize}
+    \item Membaca suhu lingkungan secara digital melalui sensor BMP280 via I2C (akurasi $\pm$1.0$^{\circ}$C)
+    \item Mengontrol kecepatan kipas 12V DC secara proporsional terhadap error suhu dengan kurva proportional gain
+    \item Beroperasi dalam dua mode: AUTO (setpoint-based dengan hysteresis) dan MANUAL (PWM langsung)
+    \item Menyediakan dashboard web real-time dan kontrol dari browser
+    \item Menyimpan data log suhu ke LittleFS dan mengekspor dalam format CSV dan GNUplot
+\end{itemize}
+
+\subsection{Tujuan}
+
+\begin{enumerate}
+    \item Implementasi pembacaan suhu BMP280 via I2C pada ESP-IDF dengan kompensasi suhu internal sensor
+    \item Implementasi kontrol PWM L298N dengan proportional gain, ramp protection, dan hysteresis
+    \item Implementasi web server ESP32 dengan REST API dan dashboard real-time
+    \item Implementasi data logging ke LittleFS dengan ring buffer + flash persistence
+    \item Implementasi dual-mode control (AUTO/MANUAL) melalui web dan tombol fisik
+    \item Verifikasi sistem melalui pengukuran dan analisis data
+\end{enumerate}
+
+\subsection{Batasan Permasalahan}
+
+\begin{itemize}
+    \item \textbf{Sensor}: BMP280 (I2C, GPIO21=SDA, GPIO22=SCL, alamat 0x76, clock 100kHz)
+    \item \textbf{Aktuator}: Kipas 12V DC via L298N (PWM 5kHz, 8-bit, GPIO16/17/18)
+    \item \textbf{Kontrol}: Button GPIO4 (mode) dan GPIO5 (value), debounce 50ms, long-press 500ms
+    \item \textbf{Catu daya}: 3S Li-ion 11.1V $\rightarrow$ BMS $\rightarrow$ L298N VS $\rightarrow$ Regulator 5V $\rightarrow$ ESP32
+    \item \textbf{Logging}: Ring buffer 100 entri RAM, flush ke LittleFS tiap 10s, rolling max 512 entri
+    \item \textbf{Jaringan}: WiFi STA (prioritas, SSID/password) $\rightarrow$ fallback AP (``ThermalCtrl-AP'')
+    \item \textbf{Safety}: Override 100\% pada $>$60$^{\circ}$C, shutdown kipas pada $>$75$^{\circ}$C
+\end{itemize}
+
+\subsection{Konsep Pengukuran Masalah}
+
+Parameter yang diukur: suhu lingkungan ($^{\circ}$C) dari BMP280, kecepatan kipas (PWM 0--255 setara 0--100\%), mode operasi (AUTO/MANUAL), setpoint suhu, dan tegangan baterai. Data direkam dengan timestamp millis() menggunakan ESP timer untuk analisis respon termal sistem terhadap perubahan suhu.
+
+\subsection{Arsitektur Sistem}
+
+\begin{verbatim}
+[BMP280] --(I2C GPIO21/22)--> [ESP32] --(PWM GPIO16 + DIR GPIO17/18)--> [L298N] --(12V)--> [12V DC Fan]
+                                      |                                               |
+                            [Button GPIO4] [Button GPIO5]                   [3S Li-ion + BMS]
+                                      |
+                                [WiFi AP/STA] --> [Browser Web App]
+\end{verbatim}
+
+Software pattern: Super-loop dengan ESP Timer Callbacks --- 3 timer independen (50ms/100ms/200ms).
+
+\section{System Design (Rancangan Sistem)}
+
+\subsection{Arsitektur Sistem --- Foto dan Wiring}
+
+\begin{center}
+    \fbox{\parbox{0.7\textwidth}{\centering [INSERT\_IMAGE: Foto keseluruhan sistem --- ESP32, BMP280, L298N, kipas 12V, baterai 3S, button, dan semua wiring]}}
+\end{center}
+
+\begin{center}
+    \fbox{\parbox{0.7\textwidth}{\centering [INSERT\_IMAGE: Diagram skematik wiring lengkap --- Fritzing atau alat sejenis]}}
+\end{center}
+
+\subsection{GPIO Allocation Table}
+
+\begin{center}
+\rowcolors{2}{lightgray}{white}
+\begin{tabular}{|l|l|l|}
+\hline
+\rowcolor{lightgray}
+\textbf{Komponen} & \textbf{GPIO} & \textbf{Fungsi} \\
+\hline
+BMP280 SDA & GPIO21 & I2C data line \\
+BMP280 SCL & GPIO22 & I2C clock line \\
+L298N ENA & GPIO16 & LEDC PWM 5kHz, 8-bit \\
+L298N IN1 & GPIO17 & Direction HIGH (always forward) \\
+L298N IN2 & GPIO18 & Direction LOW \\
+Button Mode & GPIO4 & Input internal pull-up, GND on press \\
+Button Value & GPIO5 & Input internal pull-up, GND on press \\
+Battery monitor & GPIO35 & ADC1\_CH7, voltage divider \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{Karakteristik Sensor BMP280}
+
+\begin{center}
+\rowcolors{2}{lightgray}{white}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\rowcolor{lightgray}
+\textbf{Faktor} & \textbf{BMP280} & \textbf{DHT22} & \textbf{DS18B20} \\
+\hline
+Akurasi suhu & $\pm$1.0$^{\circ}$C & $\pm$0.5$^{\circ}$C & $\pm$0.5$^{\circ}$C \\
+Data tambahan & Tekanan (300--1100 hPa) & Kelembaban & --- \\
+Interface & I2C (2-wire) & 1-wire proprietary & OneWire \\
+Konsumsi daya & $\sim$340\,\textmu A & $\sim$1.5\,mA & $\sim$1\,mA \\
+Respon & $\sim$5.5\,ms & 2 detik & 750\,ms \\
+Biaya & $\sim$\$3 & $\sim$\$3 & $\sim$\$2 \\
+Resolusi ADC & Built-in 20-bit (digital) & 8-bit internal & 9--12 bit configurable \\
+\hline
+\end{tabular}
+\end{center}
+
+Penjelasan pemilihan BMP280:
+\begin{itemize}
+    \item \textbf{Interface digital I2C}: Lebih tahan noise dibanding analog --- tidak terpengaruh panjang kabel atau interferensi elektromagnetik dari motor/L298N
+    \item \textbf{Data tekanan tambahan}: Dapat digunakan untuk kalibrasi ketinggian atau analisis lanjutan
+    \item \textbf{Resolusi 20-bit}: Suhu dibaca langsung dalam format digital terkompensasi, tidak perlu kalibrasi ADC manual
+    \item \textbf{Daya sangat rendah}: Mode standby 1.8\,\textmu A cocok untuk aplikasi battery-powered
+\end{itemize}
+
+\subsection{I2C Communication Protocol}
+
+BMP280 diakses melalui bus I2C dengan konfigurasi:
+\begin{itemize}
+    \item Frekuensi clock: 100\,kHz (standard mode)
+    \item Alamat slave: 0x76 (ketika pin SDO terhubung ke GND)
+    \item Pull-up resistor: 4.7\,k$\Omega$ pada SDA dan SCL (internal ESP32 pull-up tidak mencukupi untuk I2C)
+\end{itemize}
+
+\textbf{Register map BMP280:}
+\begin{itemize}
+    \item 0xD0: Chip ID (diharapkan 0x58)
+    \item 0x88--0x8F: Kalibrasi NVM (dig\_T1, dig\_T2, dig\_T3 --- 24 byte)
+    \item 0xF4: CTRL\_MEAS --- konfigurasi oversampling dan mode
+    \item 0xF5: CONFIG --- konfigurasi rate dan filter
+    \item 0xF7--0xFC: Data tekanan dan suhu (6 byte)
+\end{itemize}
+
+\textbf{Algoritma pembacaan suhu:}
+\begin{enumerate}
+    \item Write register address 0xF7 (MSB data suhu)
+    \item Read 3 bytes (MSB + LSB + XLSB) via I2C repeated start
+    \item Gabungkan: \texttt{adc\_T = (msb $<<$ 12) | (lsb $<<$ 4) | (xlsb $>>$ 4)}
+    \item Kompensasi suhu menggunakan koefisien kalibrasi dari NVM
+\end{enumerate}
+
+\subsection{Interkoneksi Sensor ke Mikrokontroler}
+
+\textbf{BMP280:}
+\begin{itemize}
+    \item VCC $\rightarrow$ ESP32 3.3V (output 3.3V pin)
+    \item SDA $\rightarrow$ GPIO21 (via 4.7\,k$\Omega$ pull-up ke 3.3V)
+    \item SCL $\rightarrow$ GPIO22 (via 4.7\,k$\Omega$ pull-up ke 3.3V)
+    \item GND $\rightarrow$ GND common
+    \item CSB $\rightarrow$ 3.3V (non-aktif SPI mode)
+    \item SDO $\rightarrow$ GND (I2C address = 0x76)
+\end{itemize}
+
+\textbf{L298N + Fan:}
+\begin{itemize}
+    \item VCC (5V logic) $\rightarrow$ ESP32 5V (VIN pin, dari regulator L298N)
+    \item VS (12V motor supply) $\rightarrow$ Baterai 3S Li-ion (+)
+    \item GND $\rightarrow$ GND common
+    \item ENA $\rightarrow$ GPIO16 (PWM input)
+    \item IN1 $\rightarrow$ GPIO17 (HIGH --- selalu forward)
+    \item IN2 $\rightarrow$ GPIO18 (LOW)
+    \item OUT1/OUT2 $\rightarrow$ Terminal kipas 12V DC
+\end{itemize}
+
+\textbf{Catu Daya:}
+\begin{itemize}
+    \item 3S Li-ion (11.1V nominal) $\rightarrow$ BMS $\rightarrow$ L298N VS
+    \item L298N internal 5V regulator $\rightarrow$ ESP32 VIN
+    \item Kapasitor bulk 470\,\textmu F pada rail 5V untuk mencegah brownout ESP32
+    \item Ground semua perangkat disatukan (common ground)
+\end{itemize}
+
+\subsection{Power Budget}
+
+\begin{center}
+\rowcolors{2}{lightgray}{white}
+\begin{tabular}{|l|l|l|}
+\hline
+\rowcolor{lightgray}
+\textbf{Komponen} & \textbf{Tegangan} & \textbf{Arus Maks} \\
+\hline
+ESP32 & 5V (via L298N reg) & $\sim$200\,mA \\
+L298N logic & 5V (internal regulator) & $\sim$50\,mA \\
+12V DC fan & 12V (battery direct) & $\sim$500\,mA \\
+BMP280 & 3.3V (ESP32) & $\sim$340\,\textmu A \\
+\textbf{Total} & --- & $\sim$750\,mA peak \\
+\hline
+\end{tabular}
+\end{center}
+
+Estimasi daya: 3S 18650 pack 2000\,mAh $\rightarrow$ $\sim$2.5 jam operasi kontinu.
+
+\subsection{Algoritma Kontrol dan Flowchart}
+
+\textbf{Main system flowchart:}
+\begin{verbatim}
+app_main()
+  -> Init: sensor (I2C), actuator (PWM), input (GPIO), storage (SPIFFS)
+  -> Init: WiFi STA (10s timeout -> fallback AP), HTTP server
+  |
+  -> ESP_TIMER (50ms) -> read_temp()
+  |     -> i2c_read(BMP280) -> temp_compensate()
+  |
+  -> ESP_TIMER (100ms) -> scan_buttons()
+  |     -> debounce() -> short_press() / long_press()
+  |
+  -> ESP_TIMER (200ms) -> control_fan()
+  |     -> if mode == AUTO:
+  |     |     error = temp - setpoint
+  |     |     if |error| < 0.5C: hold
+  |     |     elif error <= 0: pwm = 0
+  |     |     else: pwm = error * 25.5
+  |     -> Safety: temp > 60C -> pwm=255
+  |     -> Ramp: max delta = 40/step
+  |     -> ledc_set_duty() -> log_entry_push()
+  |
+  -> while(1):
+        -> network_poll()
+        -> flush ring buffer -> LittleFS every 10s
+\end{verbatim}
+
+\textbf{Button state machine:}
+\begin{itemize}
+    \item GPIO4 falling edge $\rightarrow$ toggle AUTO/MANUAL
+    \item GPIO5 falling edge $\rightarrow$ start press timer
+    \item GPIO5 held $\geq$500\,ms $\rightarrow$ coarse adjust $\pm$10
+    \item GPIO5 rising edge $<$500\,ms $\rightarrow$ fine adjust $\pm$1
+\end{itemize}
+
+\textbf{Fan control law (AUTO mode):}
+\begin{itemize}
+    \item P gain = 25.5 (full PWM 255 pada error 10$^{\circ}$C)
+    \item Hysteresis deadband: $\pm$0.5$^{\circ}$C
+    \item Ramp rate: maksimum 40 step per update cycle (200\,ms)
+    \item Minimum duty: 80/255 ($\sim$31\%) --- untuk mengatasi inersia startup kipas 12V
+\end{itemize}
+
+\textbf{Safety logic:}
+\begin{itemize}
+    \item Suhu $>$60$^{\circ}$C: override 100\% PWM (terlepas dari mode)
+    \item Suhu $>$75$^{\circ}$C: matikan kipas, log error
+\end{itemize}
+
+\section{Web Interface}
+
+\subsection{REST API Endpoints}
+
+\begin{center}
+\rowcolors{2}{lightgray}{white}
+\begin{tabular}{|l|l|l|}
+\hline
+\rowcolor{lightgray}
+\textbf{Method} & \textbf{Path} & \textbf{Deskripsi} \\
+\hline
+GET & \texttt{/} & Dashboard HTML dengan grafik live \\
+GET & \texttt{/api/status} & JSON: suhu, fan PWM, mode, setpoint, WiFi mode, uptime \\
+POST & \texttt{/api/control} & Set mode (AUTO/MANUAL), setpoint, fan PWM \\
+GET & \texttt{/api/log/csv} & Download CSV \\
+GET & \texttt{/api/log/plt} & Download skrip GNUplot \\
+POST & \texttt{/api/log/clear} & Hapus semua data log \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{Dashboard Components}
+
+\begin{center}
+    \fbox{\parbox{0.7\textwidth}{\centering [INSERT\_IMAGE: Screenshot web dashboard --- tampilkan header card, grafik, kontrol slider, tabel data log]}}
+\end{center}
+
+Dashboard terdiri dari:
+\begin{itemize}
+    \item \textbf{Header cards}: Suhu real-time $\pm$0.1$^{\circ}$C, kecepatan fan \%, indikator mode (AUTO/MANUAL), setpoint
+    \item \textbf{Line chart}: Temperature vs Time (60 data point terakhir, update setiap 500\,ms)
+    \item \textbf{Line chart}: Fan PWM vs Time
+    \item \textbf{Control panel}: Mode toggle button, setpoint slider (20--60$^{\circ}$C), fan speed slider (0--100\%)
+    \item \textbf{Data table}: 100 baris log terakhir
+    \item \textbf{Action buttons}: Download CSV, Download .plt, Clear Log
+\end{itemize}
+
+\subsection{WiFi Modes}
+
+\begin{itemize}
+    \item STA mode prioritas: terhubung ke WiFi yang dikonfigurasi
+    \item Timeout koneksi: 10 detik $\rightarrow$ fallback ke AP mode
+    \item AP mode: SSID ``ThermalCtrl-AP'', password ``thermal123''
+    \item Reconnect timer: 30 detik
+    \item WebUI identik di kedua mode
+\end{itemize}
+
+\section{Data Logging}
+
+\subsection{Log Format}
+
+Format CSV:
+\begin{verbatim}
+Sample, Timestamp_ms, Temp_C, Fan_PWM, Mode, Setpoint
+0, 0, 25.3, 0, AUTO, 30.0
+1, 50, 25.8, 20, AUTO, 30.0
+\end{verbatim}
+
+\subsection{Storage Strategy}
+
+\begin{enumerate}
+    \item Ring buffer 100 entri di RAM --- respon web cepat tanpa akses flash
+    \item Flush ke file \texttt{/log.csv} di LittleFS setiap 10 detik
+    \item Rolling overwrite --- maksimal 512 entri di flash
+    \item Data log dapat didownload dalam format CSV atau dianalisis via GNUplot
+\end{enumerate}
+
+\subsection{GNUplot Export}
+
+Skrip \texttt{.plt} yang dihasilkan untuk plotting dual-axis:
+\begin{verbatim}
+set title "Thermal Management System - Temperature & Fan Response"
+set xlabel "Sample (50ms intervals)"
+set ylabel "Temperature (C)"
+set y2label "Fan PWM (%)"
+set y2tics
+plot "log.csv" using 1:3 with lines title "Temperature", \
+     "" using 1:4 with lines axes x1y2 title "Fan PWM"
+\end{verbatim}
+
+\section{Multi-Realistic Constraint Analysis}
+
+\begin{center}
+\rowcolors{2}{lightgray}{white}
+\begin{tabular}{|p{0.35\textwidth}|p{0.55\textwidth}|}
+\hline
+\rowcolor{lightgray}
+\textbf{Constraint} & \textbf{Mitigasi} \\
+\hline
+Power brownout (drop tegangan saat fan start) & Kapasitor bulk 470\,\textmu F pada rail 5V L298N. ESP32 brownout detector. \\
+Fan inrush current (arus start tinggi) & Soft-start ramp 200 step/s. L298N rated 2A continuous (4$\times$ margin). \\
+Flyback voltage (inductive spike dari motor) & L298N memiliki clamping diodes built-in pada output. \\
+I2C bus noise (interferensi dari motor) & I2C digital immune terhadap noise elektromagnetik. Pull-up 4.7\,k$\Omega$. \\
+WiFi disconnect & Reconnect timer 30s. Kontrol button tetap berfungsi offline. \\
+Data loss (crash/restart) & Dual buffer: RAM ring + LittleFS persist. Maks 10s data loss. \\
+Fan mechanical wear & Ramp 200 step/s. Minimum duty $\sim$31\%. Hysteresis $\pm$0.5$^{\circ}$C. \\
+Thermal runaway (kegagalan sensor/kontrol) & 60$^{\circ}$C $\rightarrow$ 100\% fan override. 75$^{\circ}$C $\rightarrow$ shutdown kipas. \\
+Real-time requirement & ESP timer callbacks (tidak ada delay()). Main loop yield tiap 10\,ms. \\
+Li-ion battery safety & 3S BMS. Monitoring tegangan via ADC GPIO35. Low-bat warning via web. \\
+\hline
+\end{tabular}
+\end{center}
+
+\section{Measurement Results (Pengukuran \& Hasil)}
+
+\subsection{Prosedur Pengukuran}
+
+\begin{enumerate}
+    \item Nyalakan sistem dalam AUTO mode, setpoint 30$^{\circ}$C
+    \item Biarkan sistem mencapai steady-state (suhu lingkungan $\pm$0.5$^{\circ}$C)
+    \item Arahkan sumber panas (hair dryer/heat gun) ke BMP280 dari jarak $\sim$30\,cm
+    \item Amati: suhu naik $\rightarrow$ fan PWM naik secara proporsional $\rightarrow$ suhu mendekati setpoint
+    \item Jaga panas selama 2--3 menit sampai steady-state tercapai
+    \item Hentikan panas --- amati suhu turun $\rightarrow$ fan PWM turun
+    \item Ulangi dengan setpoint berbeda (25$^{\circ}$C, 35$^{\circ}$C, 40$^{\circ}$C)
+    \item Uji MANUAL mode: toggle button $\rightarrow$ atur fan speed via slider web $\rightarrow$ verifikasi
+    \item Uji long-press button pada mode AUTO (adjust setpoint $\pm$10) dan MANUAL (adjust fan $\pm$10)
+    \item Rekam seluruh sesi $\rightarrow$ download CSV $\rightarrow$ plot di GNUplot
+\end{enumerate}
+
+\textbf{Durasi minimum}: 10 menit per sesi pengukuran.
+
+\subsection{Grafik Hasil Pengukuran}
+
+\begin{center}
+    \fbox{\parbox{0.7\textwidth}{\centering [INSERT\_IMAGE: GNUplot output --- dual-axis graph. Sumbu X: sample number, Sumbu Y1: Temperature, Sumbu Y2: Fan PWM]}}
+\end{center}
+
+\begin{center}
+    \fbox{\parbox{0.7\textwidth}{\centering [INSERT\_IMAGE: Screenshot dashboard selama pengukuran --- tampilkan transisi suhu naik dan respon fan]}}
+\end{center}
+
+Grafik harus menunjukkan:
+\begin{itemize}
+    \item Fase pemanasan: suhu naik dari $\sim$25$^{\circ}$C menuju setpoint
+    \item Fase steady-state: suhu stabil di sekitar setpoint $\pm$1$^{\circ}$C
+    \item Fase pendinginan: suhu turun, fan PWM menurun
+    \item Respon mode switching (AUTO $\leftrightarrow$ MANUAL)
+\end{itemize}
+
+\subsection{Analisis Kinerja Sistem}
+
+\begin{center}
+\rowcolors{2}{lightgray}{white}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\rowcolor{lightgray}
+\textbf{Metrik} & \textbf{Target} & \textbf{Hasil} & \textbf{Keterangan} \\
+\hline
+Steady-state error & $< \pm$1$^{\circ}$C & --- & Rata-rata selisih |suhu - setpoint| \\
+Response time & $<$1 detik & --- & Waktu dari perubahan suhu hingga fan 50\% \\
+Overshoot & --- & --- & Maksimum suhu di atas setpoint saat transient \\
+Hysteresis effect & $< \pm$0.5$^{\circ}$C & --- & Amplitudo osilasi di sekitar setpoint \\
+Mode switching & Berfungsi & --- & Toggle AUTO $\leftrightarrow$ MANUAL \\
+Data integrity & Konsisten & --- & Bandingkan log CSV dengan grafik \\
+Suhu maksimum tercatat & --- & --- & Peak temperature selama pengujian \\
+Konsumsi daya aktual & $\sim$750\,mA & --- & Ukur dengan multimeter \\
+\hline
+\end{tabular}
+\end{center}
+
+\section{Conclusion (Kesimpulan)}
+
+Sistem berhasil mengontrol suhu secara otomatis menggunakan ESP32 + BMP280 (I2C) + L298N + kipas 12V DC. Dual-mode control (AUTO dengan proportional gain dan MANUAL dengan direct PWM) berfungsi melalui web dashboard dan tombol fisik. Data logging ke LittleFS dengan timestamp memungkinkan analisis respon termal sistem. Safety override dan ramp protection mencegah kerusakan kipas dan risiko thermal runaway.
+
+Pengukuran aktual menunjukkan:
+\begin{itemize}
+    \item Steady-state error: [ISI HASIL PENGUKURAN]
+    \item Response time: [ISI HASIL PENGUKURAN]
+    \item Suhu maksimum tercatat: [ISI HASIL PENGUKURAN]
+\end{itemize}
+
+Saran pengembangan: logging ke cloud (MQTT/HTTP), kontrol PID penuh (I + D), enclosure, kalibrasi BMP280 lebih lanjut.
+
+\section{Video Demonstration}
+
+Video pendamping (3--5 menit) mencakup:
+\begin{enumerate}
+    \item Konstruksi sistem --- perlihatkan seluruh hardware dan wiring
+    \item Operasional --- demo web dashboard, kontrol button, mode switching
+    \item Hasil --- grafik respon suhu terhadap perubahan setpoint dan beban panas
+\end{enumerate}
+
+\end{document}

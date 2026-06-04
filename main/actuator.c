@@ -10,6 +10,10 @@ static fan_mode_t mode = MODE_AUTO;
 static float setpoint = DEFAULT_SETPOINT;
 
 void actuator_init(void) {
+    // THESE MUST BE INSIDE THE BRACES!
+    gpio_reset_pin(L298N_IN1_GPIO);
+    gpio_reset_pin(L298N_IN2_GPIO);
+    
     gpio_set_direction(L298N_IN1_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_direction(L298N_IN2_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_level(L298N_IN1_GPIO, 1);
@@ -34,12 +38,13 @@ void actuator_init(void) {
     ledc_channel_config(&chan_cfg);
 }
 
+// Fixed to silence the "-Wtype-limits" compiler warnings
 void actuator_set_pwm(uint8_t duty) {
-    target_pwm = (duty > PWM_MAX) ? PWM_MAX : duty;
+    target_pwm = ((int)duty > PWM_MAX) ? PWM_MAX : duty;
 }
 
 void actuator_ramp_to(uint8_t target) {
-    target_pwm = (target > PWM_MAX) ? PWM_MAX : target;
+    target_pwm = ((int)target > PWM_MAX) ? PWM_MAX : target;
 }
 
 uint8_t actuator_get_pwm(void) { return current_pwm; }
@@ -50,18 +55,13 @@ float actuator_get_setpoint(void) { return setpoint; }
 
 void actuator_compute(float temp_c) {
     if (temp_c >= TEMP_CRITICAL) {
-        actuator_set_pwm(0);
-        return;
-    }
-    if (temp_c >= TEMP_SAFETY_MAX) {
         actuator_set_pwm(PWM_MAX);
-        return;
-    }
-
-    if (mode == MODE_AUTO) {
+    } else if (temp_c >= TEMP_SAFETY_MAX) {
+        actuator_set_pwm(PWM_MAX);
+    } else if (mode == MODE_AUTO) {
         float error = temp_c - setpoint;
         if (fabsf(error) < TEMP_HYSTERESIS) {
-            // hold current
+            // hold current: do nothing to target_pwm
         } else if (error <= 0) {
             target_pwm = 0;
         } else {
@@ -72,14 +72,22 @@ void actuator_compute(float temp_c) {
         }
     }
 
+    // Smooth Ramping Logic (Fixed oscillation bug)
     if (current_pwm < target_pwm) {
-        current_pwm += PWM_RAMP_STEP;
-        if (current_pwm > target_pwm) current_pwm = target_pwm;
+        if ((current_pwm + PWM_RAMP_STEP) > target_pwm) {
+            current_pwm = target_pwm;
+        } else {
+            current_pwm += PWM_RAMP_STEP;
+        }
     } else if (current_pwm > target_pwm) {
-        if (current_pwm > PWM_RAMP_STEP) current_pwm -= PWM_RAMP_STEP;
-        else current_pwm = 0;
+        if (current_pwm < (target_pwm + PWM_RAMP_STEP)) {
+            current_pwm = target_pwm;
+        } else {
+            current_pwm -= PWM_RAMP_STEP;
+        }
     }
 
+    // Update Hardware
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, current_pwm);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }

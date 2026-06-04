@@ -1,0 +1,26 @@
+block-beta
+  columns 4
+
+  ESP32["ESP32 Dev Board"]:2
+  Space:1
+  BMP280["BMP280 Sensor"]:1
+
+  ESP32 -- "GPIO21 (SDA)" --> BMP280
+  ESP32 -- "GPIO22 (SCL)" --> BMP280
+  ESP32 -- "GPIO16" --> L298N
+  ESP32 -- "GPIO17" --> L298N
+  ESP32 -- "GPIO18" --> L298N
+  ESP32 -- "GPIO4" --> BTN1
+  ESP32 -- "GPIO5" --> BTN2
+  ESP32 -- "3.3V" --> BMP280
+  ESP32 -- "GND" --> BMP280
+
+  block:L298N["L298N Driver"]:2
+  end
+
+  L298N -- "OUT1/OUT2" --> FAN["12V Fan"]
+  L298N -- "VS" --> BATT["3S 12V Battery"]
+  L298N -- "GND" --> BATT
+
+  BTN1["Mode Button"] --> GND
+  BTN2["Val Button"] --> GND

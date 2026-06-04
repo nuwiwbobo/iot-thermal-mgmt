@@ -6,6 +6,7 @@
 #include "storage.h"
 #include "config.h"
 #include "esp_timer.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -14,6 +15,7 @@ uint8_t g_fan_pwm = 0;
 int g_mode = 0;
 float g_setpoint = DEFAULT_SETPOINT;
 
+static const char* TAG = "thermal";
 static int64_t last_log_flush = 0;
 
 static void on_button(int delta, bool long_press) {
@@ -23,17 +25,25 @@ static void on_button(int delta, bool long_press) {
         return;
     }
 
-    if (g_mode == 0) {
+    if (g_mode == 0) { // AUTO MODE
+        // Short press = +0.5°C, Long press = +10.0°C
         float adj = long_press ? delta : delta * 0.5f;
         g_setpoint += adj;
-        if (g_setpoint < 15) g_setpoint = 15;
-        if (g_setpoint > 60) g_setpoint = 60;
+        
+        // Wrap around logic
+        if (g_setpoint > 60.0f) {
+            g_setpoint = 15.0f; // Reset to minimum
+        }
         actuator_set_setpoint(g_setpoint);
-    } else {
+    } 
+    else { // MANUAL MODE
         int pwm = actuator_get_pwm();
-        pwm += long_press ? delta : delta;
-        if (pwm < 0) pwm = 0;
-        if (pwm > PWM_MAX) pwm = PWM_MAX;
+        pwm += delta; // delta is already 1 or 10 from input.c
+        
+        // Wrap around logic
+        if (pwm > PWM_MAX) {
+            pwm = 0; // Reset to minimum (fan off)
+        }
         actuator_set_pwm(pwm);
     }
 }
@@ -46,6 +56,8 @@ static void timer_scan_buttons(void* arg) {
     input_scan();
 }
 
+static int debug_count = 0;
+
 static void timer_control_fan(void* arg) {
     actuator_compute(g_temp_c);
     g_fan_pwm = actuator_get_pwm();
@@ -57,6 +69,13 @@ static void timer_control_fan(void* arg) {
         .setpoint = g_setpoint,
     };
     storage_push(&entry);
+
+    if (++debug_count >= 10) {
+        ESP_LOGI(TAG, "Temp: %.1f°C  Fan: %u%%  Mode: %s  Setpoint: %.1f°C",
+                 g_temp_c, g_fan_pwm * 100 / PWM_MAX,
+                 g_mode ? "MANUAL" : "AUTO", g_setpoint);
+        debug_count = 0;
+    }
 }
 
 void app_main(void) {
