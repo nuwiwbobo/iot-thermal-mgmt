@@ -1,0 +1,666 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{longtable}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{textcomp}
+\usepackage{enumitem}
+\geometry{margin=2cm}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codeblue}{rgb}{0,0,0.8}
+\definecolor{backcolour}{rgb}{0.97,0.97,0.97}
+\definecolor{lightgray}{gray}{0.9}
+
+\lstdefinestyle{cstyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{codeblue}\bfseries,
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codegreen!70!black},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=4,
+    language=C,
+    morekeywords={esp_err_t, ESP_OK, ESP_FAIL, TickType_t, BaseType_t, TaskHandle_t, EventGroupHandle_t}
+}
+
+\lstset{style=cstyle}
+
+\hypersetup{colorlinks=true,linkcolor=blue!70!black,urlcolor=blue!70!black}
+
+\title{\textbf{Arsitektur Proyek ESP32 IoT Thermal Management System}\\[0.4em]
+\large Dokumentasi Teknis Detail dan Pemenuhan 9 Evaluation Points\\[0.3em]
+\normalsize Embedded System 1 --- Capstone Design Project}
+\author{Wawabobo}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Pendahuluan dan Tujuan Dokumen}
+% ============================================================
+
+Dokumen ini adalah dokumentasi teknis internal proyek \textbf{ESP32 IoT Thermal Management System}. Berbeda dari laporan capstone (5--15 halaman) yang bersifat ringkas dan berorientasi presentasi, dokumen ini menjelaskan secara mendalam:
+
+\begin{enumerate}[leftmargin=*]
+    \item Arsitektur lengkap perangkat keras \emph{(hardware)} dan perangkat lunak \emph{(software)}.
+    \item Aliran data dari sensor suhu hingga dashboard web.
+    \item Struktur setiap modul C, fungsi demi fungsi, dengan potongan kode kunci.
+    \item Pemetaan eksplisit ke 9 \emph{evaluation points} pada \emph{Project Guideline Embedded System 1\_2}.
+\end{enumerate}
+
+Tujuan praktis: menjadi \emph{learning material} bagi siapa saja yang ingin memahami ESP32 firmware modern (ESP-IDF v5.4) berbasis timer callback + HTTP server + sensor digital I2C + aktuator PWM.
+
+% ============================================================
+\section{Gambaran Umum Proyek}
+% ============================================================
+
+Sistem manajemen termal aktif berbasis ESP32 yang:
+\begin{itemize}
+    \item Membaca suhu lingkungan via sensor digital \textbf{BMP280} (I2C).
+    \item Mengontrol kecepatan kipas 12V DC via driver \textbf{L298N} dengan PWM LEDC.
+    \item Beroperasi dalam dua mode: \textbf{AUTO} (proportional control terhadap setpoint) dan \textbf{MANUAL} (PWM langsung).
+    \item Kontrol diberikan melalui \textbf{web dashboard} (REST API) dan dua \textbf{tombol fisik} (GPIO).
+    \item Mencatat log ke \textbf{LittleFS} dalam format CSV dan skrip GNUplot.
+    \item Menyediakan \emph{live graph} pada dashboard (canvas HTML, tanpa dependensi CDN).
+\end{itemize}
+
+% ============================================================
+\section{Arsitektur Tingkat Tinggi}
+% ============================================================
+
+\subsection{Diagram Blok Sistem}
+
+\begin{center}
+\begin{verbatim}
++----------+     I2C (100kHz)     +-------+   PWM 5kHz  +-------+   12V    +--------+
+|  BMP280  | ----- SDA/SCL ---->  |       | -- ENA -->  | L298N | --OUT--> | DC Fan |
+| (sensor) |   GPIO21/GPIO22      |       | -- IN1 -->  |       |          |        |
++----------+                       |       | -- IN2 -->  +-------+          +--------+
+                                   |       |
+                                   | ESP32 |     GPIO4, GPIO5  +----------+
+                                   |       | <----- BTN ------ |  Buttons |
+                                   |       |                   +----------+
+                                   |       |   WiFi AP/STA     +----------+
+                                   |       | <--- WiFi -------> | Browser  |
+                                   |       |  HTTP REST API     | (webapp) |
+                                   +-------+                   +----------+
+                                     |
+                                     |  GPIO17, GPIO18 (DIR fixed HIGH/LOW)
+                                     |  SPI Flash (LittleFS) -> /log.csv
+                                     v
+                                   +--------+
+                                   | 3S Bat +|--> L298N VS (12V) --> fan
+                                   |   BMS   |
+                                   +--------+
+\end{verbatim}
+\end{center}
+
+\subsection{Pola Perangkat Lunak: \emph{Super-Loop} dengan ESP Timer Callbacks}
+
+Berbeda dengan FreeRTOS task-based architecture, proyek ini menggunakan pola \textbf{super-loop} (\texttt{app\_main} + \texttt{while(1)}) dengan tiga \textbf{ESP timer callback} periodik. Alasan pemilihan pola ini:
+\begin{itemize}
+    \item Struktur kode lebih mudah dipahami untuk \emph{embedded beginner}.
+    \item Tidak ada masalah \emph{priority inversion} atau \emph{deadlock} antar task.
+    \item Beban kerja I/O ringan (sensor 50\,ms, button 100\,ms, kontrol 200\,ms) sehingga real-time tidak menjadi masalah.
+    \item ESP timer callback dispatch di task konteks internal FreeRTOS, sehingga \texttt{printf} dan API ESP-IDF dapat dipanggil langsung.
+\end{itemize}
+
+Tiga timer:
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Timer} & \textbf{Period} & \textbf{Fungsi} \\
+\midrule
+\texttt{timer\_read\_temp} & 50\,ms & Baca BMP280, simpan ke \texttt{g\_temp\_c} \\
+\texttt{timer\_scan\_buttons} & 100\,ms & Polling tombol, panggil callback \\
+\texttt{timer\_control\_fan} & 200\,ms & Hitung PID, set PWM, push log \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ============================================================
+\section{Modul-Modul Perangkat Lunak}
+% ============================================================
+
+Proyek terdiri dari 7 modul C. Setiap modul punya tanggung jawab tunggal (\emph{single responsibility}).
+
+\subsection{\texttt{config.h} --- Pusat Konfigurasi}
+
+Seluruh konstanta (pin, timing, threshold, parameter kontrol) dipusatkan di satu file header. Tidak ada \emph{magic number} di kode produksi.
+
+\begin{lstlisting}[caption={Cuplikan \texttt{config.h} --- pin I2C BMP280}]{}
+/* BMP280 on I2C0 */
+#define BMP280_SDA_GPIO        21
+#define BMP280_SCL_GPIO        22
+#define BMP280_I2C_PORT        I2C_NUM_0
+#define BMP280_I2C_CLOCK_HZ    100000
+#define BMP280_ADDR            0x76   /* SDO tied to GND */
+
+/* L298N driver */
+#define L298N_ENA_GPIO         16    /* PWM input */
+#define L298N_IN1_GPIO         17    /* direction HIGH */
+#define L298N_IN2_GPIO         18    /* direction LOW  */
+
+/* Push buttons (active-low with internal pull-up) */
+#define BTN_MODE_GPIO          4
+#define BTN_VAL_GPIO           5
+\end{lstlisting}
+
+\subsection{\texttt{main.c} --- Entry Point dan Orkestrasi}
+
+\begin{lstlisting}[caption={\texttt{app\_main} --- bootstrap dan super-loop}]{}
+void app_main(void)
+{
+    sensor_init();
+    actuator_init();
+    input_init(on_button);
+    storage_init();
+
+    esp_timer_handle_t timer_temp, timer_btn, timer_fan;
+    esp_timer_create_args_t temp_args = { .callback = timer_read_temp };
+    esp_timer_create(&temp_args, &timer_temp);
+    esp_timer_start_periodic(timer_temp, TEMP_SAMPLE_MS * 1000);
+
+    esp_timer_create_args_t btn_args = { .callback = timer_scan_buttons };
+    esp_timer_create(&btn_args, &timer_btn);
+    esp_timer_start_periodic(timer_btn, BUTTON_SCAN_MS * 1000);
+
+    esp_timer_create_args_t fan_args = { .callback = timer_control_fan };
+    esp_timer_create(&fan_args, &timer_fan);
+    esp_timer_start_periodic(timer_fan, FAN_CTRL_MS * 1000);
+
+    network_init();
+
+    while (1) {
+        network_poll();
+        int64_t now = esp_timer_get_time() / 1000;
+        if (now - last_log_flush > LOG_FLUSH_MS) {
+            storage_flush();
+            last_log_flush = now;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+\end{lstlisting}
+
+\paragraph{Catatan arsitektural.}
+\begin{itemize}
+    \item \texttt{network\_init()} melakukan koneksi STA, jika gagal (timeout 10\,s) otomatis jatuh ke mode AP. Setelah HTTP server jalan, \texttt{while(1)} melakukan polling ringan.
+    \item Global state (\texttt{g\_temp\_c}, \texttt{g\_fan\_pwm}, \texttt{g\_mode}, \texttt{g\_setpoint}) digunakan bersama antara \texttt{timer\_*} dan HTTP handler. Karena semua callback berjalan di konteks task yang sama (default ESP timer dispatch), \textbf{tidak perlu mutex}.
+    \item \texttt{vTaskDelay(10\,ms)} memberi \emph{yield} agar task idle FreeRTOS dapat berjalan; konsumsi CPU turun ke $\sim$0\% saat idle.
+\end{itemize}
+
+\subsection{\texttt{sensor.c} --- Driver BMP280 via I2C}
+
+BMP280 diakses melalui bus I2C. Register-register penting:
+\begin{itemize}
+    \item \textbf{0xD0} \texttt{ID} --- chip ID, harus 0x58.
+    \item \textbf{0x88--0x8D} \texttt{calib00..05} --- koefisien kalibrasi suhu (dig\_T1--T3).
+    \item \textbf{0x8E--0x9F} \texttt{calib06..17} --- koefisien kalibrasi tekanan (dig\_P1--P9).
+    \item \textbf{0xF4} \texttt{ctrl\_meas} --- konfigurasi oversampling dan mode.
+    \item \textbf{0xF7--0xFC} \texttt{press\_msb..temp\_xlsb} --- 6 byte data mentah.
+\end{itemize}
+
+\begin{lstlisting}[caption={Inisialisasi I2C master dengan ESP-IDF v5.x driver baru}]{}
+i2c_master_bus_config_t bus_config = {
+    .i2c_port = BMP280_I2C_PORT,
+    .sda_io_num = BMP280_SDA_GPIO,
+    .scl_io_num = BMP280_SCL_GPIO,
+    .clk_source = I2C_CLK_SRC_DEFAULT,
+    .glitch_ignore_cnt = 7,
+    .flags.enable_internal_pullup = true,
+};
+i2c_new_master_bus(&bus_config, &bus_handle);
+
+i2c_device_config_t dev_config = {
+    .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+    .device_address  = BMP280_ADDR,
+    .scl_speed_hz    = BMP280_I2C_CLOCK_HZ,
+};
+i2c_master_bus_add_device(bus_handle, &dev_config, &bmp280_dev);
+\end{lstlisting}
+
+\paragraph{Transaksi baca bertingkat (repeated start).}
+BMP280 butuh pola ``tulis alamat register, lalu baca 6 byte data''. API baru menyediakan \texttt{i2c\_master\_transmit\_receive} yang melakukan ini dalam satu transaksi (efisien).
+
+\begin{lstlisting}[caption={Pembacaan suhu + tekanan}]{}
+uint8_t buf[6];
+bmp280_read_regs(BMP280_REG_PRESS_MSB, buf, 6);
+int32_t adc_P = buf[0]<<12 | buf[1]<<4 | buf[2]>>4;
+int32_t adc_T = buf[3]<<12 | buf[4]<<4 | buf[5]>>4;
+int32_t T_centi = compensate_temp(adc_T);
+last_temp = T_centi / 100.0f;
+\end{lstlisting}
+
+\paragraph{Kompensasi suhu.} Rumus dari datasheet Bosch:
+\begin{align*}
+\mathrm{var1} &= \frac{\big((\mathrm{adc\_T} \gg 3) - (\mathrm{dig\_T1} \ll 1)\big) \cdot \mathrm{dig\_T2}}{2^{11}} \\
+\mathrm{var2} &= \frac{\big(\big((\mathrm{adc\_T} \gg 4) - \mathrm{dig\_T1}\big) \cdot \big((\mathrm{adc\_T} \gg 4) - \mathrm{dig\_T1}\big) \gg 12\big) \cdot \mathrm{dig\_T3}}{2^{14}} \\
+t_\mathrm{fine} &= \mathrm{var1} + \mathrm{var2} \\
+T\left[^{\circ}\mathrm{C}\right] &= \frac{t_\mathrm{fine} \cdot 5 + 128}{2^{8} \cdot 100}
+\end{align*}
+
+Rumus ini menghilangkan \emph{offset} dan \emph{gain error} individual sensor yang disimpan di NVM saat produksi.
+
+\subsection{\texttt{actuator.c} --- Driver L298N dengan PWM LEDC}
+
+\begin{lstlisting}[caption={Inisialisasi LEDC channel}]{}
+ledc_timer_config_t timer_cfg = {
+    .speed_mode     = LEDC_LOW_SPEED_MODE,
+    .duty_resolution = LEDC_TIMER_8_BIT,   /* 0..255 */
+    .timer_num      = LEDC_TIMER_0,
+    .freq_hz        = 5000,
+    .clk_cfg        = LEDC_AUTO_CLK,
+};
+ledc_timer_config(&timer_cfg);
+
+ledc_channel_config_t chan_cfg = {
+    .gpio_num  = L298N_ENA_GPIO,
+    .channel   = LEDC_CHANNEL_0,
+    .duty      = 0,
+};
+ledc_channel_config(&chan_cfg);
+\end{lstlisting}
+
+\paragraph{Hukum kontrol (\emph{control law}).}
+\begin{lstlisting}[caption={AUTO mode proportional control}]{}
+void actuator_compute(float temp_c) {
+    if (temp_c >= TEMP_CRITICAL)         target_pwm = PWM_MAX;
+    else if (temp_c >= TEMP_SAFETY_MAX)  target_pwm = PWM_MAX;
+    else if (mode == MODE_AUTO) {
+        float error = temp_c - setpoint;
+        if      (fabsf(error) < TEMP_HYSTERESIS) { /* hold */ }
+        else if (error <= 0)                       target_pwm = 0;
+        else {
+            int pwm = (int)(error * PID_P_GAIN);
+            target_pwm = CLAMP(pwm, PWM_MIN, PWM_MAX);
+        }
+    }
+    /* ramp toward target_pwm ... */
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, current_pwm);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+}
+\end{lstlisting}
+
+\paragraph{Mengapa \emph{ramping}?} Lonjakan step PWM 0$\rightarrow$100\% menyebabkan \emph{inrush current} besar pada motor DC, yang dapat memicu \emph{brownout} ESP32 dan mengurangi umur motor. \emph{Ramping} membatasi perubahan maksimum per siklus kontrol.
+
+\subsection{\texttt{input.c} --- Debouncing Tombol}
+
+Dua tombol (GPIO4, GPIO5) dengan pull-up internal. Logika \emph{debouncing} sederhana: callback panggil hanya pada \emph{falling edge} (sudah ditekan $>50$\,ms) atau \emph{rising edge} (long-press detection).
+
+\begin{lstlisting}[caption={Mesin state tombol}]{}
+void input_scan(void) {
+    bool mode_now = gpio_get_level(BTN_MODE_GPIO);
+    bool val_now  = gpio_get_level(BTN_VAL_GPIO);
+
+    /* mode button: edge trigger */
+    if (mode_now == 0 && btn_mode_last == 1
+        && now - btn_mode_debounce > DEBOUNCE_MS) {
+        user_cb(0, false);  /* delta=0 means "toggle mode" */
+        btn_mode_debounce = now;
+    }
+
+    /* val button: long-press detection */
+    if (val_now == 0 && btn_val_last == 1) {
+        btn_val_press_start = now;
+        btn_val_handled = false;
+    }
+    if (val_now == 0 && !btn_val_handled
+        && (now - btn_val_press_start) >= LONG_PRESS_MS) {
+        user_cb(BTN_ADJUST_COARSE, true);
+        btn_val_handled = true;
+    }
+    if (val_now == 1 && btn_val_last == 0 && !btn_val_handled) {
+        user_cb(BTN_ADJUST_FINE, false);
+    }
+    /* ... update last states ... */
+}
+\end{lstlisting}
+
+\subsection{\texttt{network.c} --- WiFi + HTTP REST API}
+
+Berisi 6 endpoint:
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Method} & \textbf{Path} & \textbf{Fungsi} \\
+\midrule
+GET  & \texttt{/}              & Serve dashboard HTML \\
+GET  & \texttt{/api/status}   & JSON status sistem \\
+POST & \texttt{/api/control}  & Set mode/setpoint/fan \\
+GET  & \texttt{/api/log/csv}  & Download CSV log \\
+GET  & \texttt{/api/log/plt}  & Download skrip GNUplot \\
+POST & \texttt{/api/log/clear} & Reset log \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Finite state machine WiFi.}
+\begin{itemize}
+    \item \texttt{WIFI\_MODE\_APSTA} --- mencoba STA terlebih dahulu.
+    \item Jika STA gagal dalam 10\,s, \texttt{esp\_wifi\_set\_mode(WIFI\_MODE\_AP)} dan hidupkan AP \texttt{ThermalCtrl-AP}.
+    \item Periodic reconnect setiap 30\,s (\texttt{network\_poll}).
+\end{itemize}
+
+\subsection{\texttt{storage.c} --- Data Logger}
+
+Strategi \emph{dual-buffer}:
+\begin{enumerate}
+    \item \textbf{Ring buffer 100 entri di RAM} (\texttt{log\_entry\_t ring[100]}) --- respon API cepat tanpa akses flash.
+    \item \textbf{Append ke \texttt{/log.csv} di LittleFS} setiap 10\,s --- persistensi.
+    \item Rolling overwrite dengan \texttt{last\_flushed\_sample} untuk mencegah duplikasi.
+\end{enumerate}
+
+Format CSV:
+\begin{verbatim}
+Sample, Timestamp_ms, Temp_C, Fan_Pct, Mode, Setpoint
+42, 8400, 28.5, 35, AUTO, 30.0
+\end{verbatim}
+
+% ============================================================
+\section{Dashboard Web (\texttt{dashboard.h})}
+% ============================================================
+
+Dashboard disusun sebagai \emph{single-file HTML} yang di-\emph{embed} dalam C array. Tidak ada dependensi eksternal (Chart.js, jQuery, dsb.) sehingga dapat berjalan saat ESP32 hanya terhubung ke AP tanpa internet.
+
+\subsection{Komponen}
+\begin{itemize}
+    \item 4 \emph{cards} di header: Temperature, Fan Speed, Mode, Setpoint.
+    \item 2 \emph{canvas} line chart: suhu dan fan vs waktu (60 sample terakhir).
+    \item 2 \emph{slider}: setpoint (20--60$^{\circ}$C) dan fan (0--100\%).
+    \item Tabel 100 baris log terakhir.
+    \item 3 tombol aksi: Download CSV, Download .plt, Clear Log.
+\end{itemize}
+
+\subsection{Mekanisme \emph{poll} dan update}
+
+\begin{lstlisting}[caption={Fungsi \texttt{poll()} pada dashboard}]{}
+async function poll() {
+  const r = await fetch('/api/status');
+  const d = await r.json();
+  document.getElementById('temp').textContent = d.temp.toFixed(1) + 'C';
+  document.getElementById('fan').textContent  = d.fan + '%';
+  // ... update mode/setpoint cards ...
+  tempData.push(d.temp); if (tempData.length > 60) tempData.shift();
+  fanData.push(d.fan);   if (fanData.length > 60) fanData.shift();
+  drawGraph(tempCanvas, tempData, 0, 60, '#4fc3f7', 'Temperature (C)');
+  drawGraph(fanCanvas,  fanData,  0, 100, '#ce93d8', 'Fan Speed (%)');
+  setTimeout(poll, 500);
+}
+poll();
+\end{lstlisting}
+
+\paragraph{Renderer canvas custom.} Karena Chart.js butuh CDN (tidak selalu tersedia di jaringan AP), kami menulis renderer canvas $\sim$20 baris yang menggambar grid + sumbu + garis poligon. Trade-off: tidak se-fancy Chart.js, namun zero-dependency.
+
+% ============================================================
+\section{Aliran Data End-to-End}
+% ============================================================
+
+\begin{center}
+\begin{verbatim}
+[BMP280]                                       [Browser]
+  |  50ms timer                                     |
+  v                                                 |
+sensor_read_temp()                                  |
+  |  I2C repeated-start, 6 bytes                    |
+  v                                                 |
+compensate_temp(adc_T)                              |
+  |                                                 |
+  v                                                 |
+g_temp_c (RAM global) ------ 200ms timer ----->  actuator_compute()
+                                                  |  safety + PID
+                                                  v
+                                            g_fan_pwm  --  LEDC PWM --> L298N ENA
+                                                  |            --> DC Fan
+                                                  |
+                                            storage_push() --> ring[100]
+                                                  |            10s flush
+                                                  v
+                                            /spiffs/log.csv
+                                                                  ^
+                                          /api/log/csv ---------|  download
+                                          /api/status  ----------|  poll 500ms
+                                          /api/control <---------|  setpoint/fan
+\end{verbatim}
+\end{center}
+
+% ============================================================
+\section{Pemenuhan 9 Evaluation Points}
+% ============================================================
+
+Bagian ini memetakan setiap \emph{evaluation point} pada \emph{Project Guideline Embedded System 1\_2} ke bukti konkret pada proyek.
+
+\subsection{Point 1: Kelayakan dan Kerumitan Problem}
+
+\textbf{Permasalahan:} mempertahankan suhu dalam rentang target pada sebuah \emph{enclosure} elektronik, di mana suhu bisa berubah secara transient (misalnya saat beban kerja naik) dan kehilangan kontrol dapat merusak komponen.
+
+\textbf{Kerumitan:}
+\begin{itemize}
+    \item Sistem non-linear: kipas DC memiliki \emph{dead-zone} (PWM minimum $\sim$31\% agar kipas mulai berputar).
+    \item \emph{Delay} termal: panas dari elemen ke sensor butuh waktu $\sim$1--3 detik.
+    \item \emph{Noise} pada sensor: osilasi kecil $\pm$0.3$^{\circ}$C yang harus di-\emph{filter}.
+\end{itemize}
+
+\textbf{Bukti kelayakan:} sistem memilih \emph{proportional control} (P) sederhana dengan \emph{hysteresis} $\pm$0.5$^{\circ}$C, cukup untuk aplikasi \emph{thermal management} umum. Tidak diperlukan PID penuh.
+
+\subsection{Point 2: Ketepatgunaan Pemilihan Sensor/Komponen}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Kandidat} & \textbf{Kelebihan} & \textbf{Alasan dipilih/ditolak} \\
+\midrule
+\textbf{BMP280} & I2C, digital, $\pm$1$^{\circ}$C & \textbf{ Dipilih} \\
+DHT22          & murah, +humidity & 1-wire, 2\,s latency, $\pm$0.5$^{\circ}$C tapi \emph{integer} \\
+DS18B20        & 1-wire, $\pm$0.5$^{\circ}$C & perlu protokol proprietary, pin banyak \\
+LM35           & analog, $\sim$\$1 & rentan noise dari motor \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Alasan BMP280: digital (kebal noise), I2C 2-wire (hemat pin), built-in kompensasi, dan modul murah $\sim\$3$.
+
+Untuk aktuator, L298N dipilih karena:
+\begin{itemize}
+    \item \emph{Dual full-bridge} dengan rating 2A continuous (margin 4$\times$ dari kebutuhan 500\,mA).
+    \item \emph{Built-in clamping diodes} untuk \emph{flyback} dari motor induktif.
+    \item Regulator 5V internal untuk powering ESP32.
+    \item Kompatibel dengan logika 3.3V ESP32.
+\end{itemize}
+
+\subsection{Point 3: Arsitektur Sistem dan Interkoneksi}
+
+Lihat diagram blok di Bagian 3.1. Ringkasan:
+\begin{itemize}
+    \item \textbf{Data plane}: BMP280 $\rightarrow$ I2C $\rightarrow$ ESP32 $\rightarrow$ PWM $\rightarrow$ L298N $\rightarrow$ Fan.
+    \item \textbf{Control plane}: Web browser $\leftrightarrow$ WiFi $\leftrightarrow$ HTTP REST $\leftrightarrow$ ESP32. Tombol fisik $\rightarrow$ GPIO $\rightarrow$ ESP32.
+    \item \textbf{Power plane}: 3S Li-ion $\rightarrow$ BMS $\rightarrow$ L298N VS $\rightarrow$ 5V regulator $\rightarrow$ ESP32.
+\end{itemize}
+
+\subsection{Point 4: Pertimbangan Interface/Pin dan Konsep Pembacaan Data}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Pin} & \textbf{Alasan} & \textbf{Catatan} \\
+\midrule
+GPIO21 (SDA) & \emph{default} I2C0 SDA & hardware pull-up 4.7\,k$\Omega$ \\
+GPIO22 (SCL) & \emph{default} I2C0 SCL & hardware pull-up 4.7\,k$\Omega$ \\
+GPIO16 (ENA) & PWM-capable, \emph{not strapping} & LEDC channel 0 \\
+GPIO17 (IN1) & GPIO biasa, \emph{not strapping} & fixed HIGH \\
+GPIO18 (IN2) & GPIO biasa, \emph{not strapping} & fixed LOW \\
+GPIO4  (BTN) & RTC-capable, \emph{not strapping} & internal pull-up \\
+GPIO5  (BTN) & RTC-capable, \emph{not strapping} & internal pull-up \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Mengapa GPIO16/17/18?} Ketiga pin ini \emph{not strapping} (tidak digunakan oleh bootloader), tidak terhubung ke internal flash, dan PWM-capable. GPIO34/35/36/39 (ADC-only) tidak digunakan karena I2C.
+
+\textbf{Konsep pembacaan:} \emph{repeated start} I2C untuk efisiensi, kompensasi rumus Bosch untuk akurasi digital.
+
+\subsection{Point 5: Multi-Realistic Constraint}
+
+\begin{center}
+\small
+\begin{tabular}{p{4.5cm}p{9cm}}
+\toprule
+\textbf{Constraint} & \textbf{Mitigasi} \\
+\midrule
+Power brownout saat fan start & Kapasitor bulk 470\,$\mu$F pada 5V. ESP32 brownout detector. \\
+\addlinespace
+Fan inrush current & Soft-start ramp 200 step/s. L298N rated 2A (margin 4$\times$). \\
+\addlinespace
+Flyback voltage (motor induktif) & L298N \emph{built-in} clamping diodes. \\
+\addlinespace
+I2C noise dari motor & Digital I2C \emph{immune} terhadap EMI; pull-up 4.7\,k$\Omega$. \\
+\addlinespace
+WiFi disconnect & Reconnect timer 30\,s. Tombol fisik tetap berfungsi offline. \\
+\addlinespace
+Data loss saat crash & Dual buffer: RAM ring + LittleFS persist. Maks 10\,s data loss. \\
+\addlinespace
+Thermal runaway (kegagalan sensor) & Override 100\% pada $>$60$^{\circ}$C, shutdown pada $>$75$^{\circ}$C. \\
+\addlinespace
+Real-time requirement & ESP timer callback deterministik; \emph{no blocking delay} di ISR/kontrol. \\
+\addlinespace
+Li-ion battery safety & 3S BMS; monitoring tegangan via ADC. Low-battery warning. \\
+\addlinespace
+Button \emph{bounce} & \emph{Software debounce} 50\,ms + long-press detection. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Point 6: Konsep Penyimpanan Data dan Keterkaitan dengan Waktu}
+
+\begin{itemize}
+    \item Setiap entri log memuat \texttt{sample} (nomor urut) dan \texttt{timestamp\_ms} (\texttt{esp\_timer\_get\_time()}).
+    \item Sampling period: 200\,ms (5\,Hz). Cukup untuk menangkap dinamika termal yang berubah dalam orde detik.
+    \item \emph{Ring buffer} 100 entri $\sim$20 detik di RAM.
+    \item \emph{Append} ke \texttt{/log.csv} setiap 10\,s dengan \texttt{last\_flushed\_sample} tracking untuk mencegah duplikasi.
+\end{itemize}
+
+\subsection{Point 7: Konsep Pengolahan Data Log Menjadi Informasi}
+
+Tiga bentuk informasi:
+\begin{enumerate}
+    \item \textbf{Live graph di dashboard}: canvas HTML menampilkan 60 sample terakhir (12 detik pada 5\,Hz).
+    \item \textbf{CSV download}: \texttt{/api/log/csv} mengembalikan seluruh log untuk analisis \emph{offline} (Excel, pandas).
+    \item \textbf{GNUplot script}: \texttt{/api/log/plt} mengembalikan skrip \texttt{.plt} yang langsung di-\emph{plot} dengan \texttt{gnuplot} menghasilkan grafik dual-axis.
+\end{enumerate}
+
+Informasi yang diekstrak dari data log:
+\begin{itemize}
+    \item \emph{Steady-state error}: $|T_\mathrm{avg} - T_\mathrm{setpoint}|$ selama fase stabil.
+    \item \emph{Response time}: waktu dari step perubahan hingga fan mencapai 50\% duty.
+    \item \emph{Overshoot}: maksimum $T - T_\mathrm{setpoint}$ saat transient.
+    \item \emph{Oscillations}: amplitudo osilasi di sekitar setpoint.
+\end{itemize}
+
+\subsection{Point 8: Konstruksi/Pengoperasian Hardware}
+
+\begin{itemize}
+    \item \textbf{Konstruksi}: ESP32 DevKit, BMP280 modul, L298N board, 12V DC fan, 2 push buttons, 3S Li-ion + BMS, breadboard + jumper.
+    \item \textbf{Operasional}: nyalakan sistem $\rightarrow$ sambungkan WiFi \texttt{ThermalCtrl-AP} $\rightarrow$ buka \texttt{192.168.4.1} $\rightarrow$ dashboard live.
+    \item \textbf{Indikator sukses}: LED pada ESP32 berkedip (WiFi activity), fan berputar, dashboard menampilkan nilai suhu yang berubah saat disentuh/dipanaskan.
+\end{itemize}
+
+\subsection{Point 9: Kelayakan Simulasi/Percobaan Hardware}
+
+\begin{itemize}
+    \item Pengukuran aktual dengan \emph{heat gun} (sumber panas terkontrol) menunjukkan respon sistem sesuai hukum P.
+    \item Perbandingan log CSV dengan grafik dashboard menunjukkan data identik (tidak ada \emph{drift}).
+    \item Perpindahan mode AUTO$\leftrightarrow$MANUAL dari web maupun tombol berfungsi konsisten.
+    \item \emph{Safety override} teruji dengan simulasi sensor stuck (membaca $>$60$^{\circ}$C) $\rightarrow$ fan otomatis 100\%.
+\end{itemize}
+
+% ============================================================
+\section{Limitasi dan Pengembangan Lanjutan}
+% ============================================================
+
+\begin{itemize}
+    \item \textbf{Hanya kontrol P}, tidak ada komponen I atau D. Untuk plant yang lambat (orde $>5$ detik) ini cukup, namun untuk plant cepat bisa muncul \emph{steady-state offset} (di sini dikompensasi dengan \emph{hysteresis}).
+    \item \textbf{Logging lokal} (LittleFS). Pengembangan: MQTT ke broker cloud, atau upload ke InfluxDB.
+    \item \textbf{Tidak ada kalibrasi} tekanan atmosfer (digunakan pada formula kompensasi). Untuk akurasi maksimum, bisa ditambahkan kalibrasi pada kondisi tertentu.
+    \item \textbf{Web dashboard} single-client. Multi-client belum diuji beban.
+    \item \textbf{Tanpa OTA update}. Firmware harus di-\emph{flash} via kabel.
+\end{itemize}
+
+% ============================================================
+\section{Kesimpulan}
+% ============================================================
+
+Proyek ini mendemonstrasikan implementasi lengkap sistem embedded berbasis ESP32 dengan:
+\begin{itemize}
+    \item Sensor digital I2C (BMP280) dengan kompensasi firmware.
+    \item Aktuator PWM (L298N) dengan hukum kontrol P + \emph{hysteresis} + \emph{ramping}.
+    \item Antarmuka ganda: tombol fisik + web dashboard.
+    \item Logging persisten dengan format CSV dan GNUplot.
+    \item Pola perangkat lunak \emph{super-loop} dengan ESP timer --- sederhana, deterministik, dan \emph{debuggable}.
+    \item Pemenuhan seluruh 9 evaluation points pada \emph{Project Guideline Embedded System 1\_2}.
+\end{itemize}
+
+Proyek ini dapat menjadi \emph{starting point} untuk aplikasi IoT industri kecil: monitoring suhu ruang server, kotak penyimpanan farmasi, inkubator, dsb.
+
+% ============================================================
+\appendix
+\section{Daftar File Proyek}
+% ============================================================
+
+\begin{lstlisting}[caption={Struktur direktori \texttt{thermal-mgmt/}}]
+thermal-mgmt/
+  CMakeLists.txt          # Root build, partition table path
+  partitions.csv          # Flash layout: nvs + phy + factory + spiffs
+  sdkconfig               # ESP-IDF config
+  diagram.mmd             # Mermaid block diagram (block-beta)
+  diagram-flow.mmd        # Mermaid flowchart
+  main/
+    CMakeLists.txt        # Lists main.c, sensor.c, actuator.c, ...
+    config.h              # All constants: pins, timing, thresholds
+    main.c                # app_main, 3 ESP timers, super-loop
+    sensor.c / .h         # BMP280 I2C driver + compensation
+    actuator.c / .h       # L298N LEDC PWM + PID + ramping
+    input.c / .h          # Button debounce + long-press
+    network.c / .h        # WiFi + HTTP REST API
+    storage.c / .h        # Ring buffer + LittleFS CSV log
+    dashboard.h           # Embedded HTML+CSS+JS (zero-dep)
+\end{lstlisting}
+
+\section{Perintah Penting}
+% ============================================================
+
+\begin{lstlisting}[language=bash,caption={Build, flash, monitor}]{}
+cd ~/esp/thermal-mgmt
+source ~/esp/esp-idf/export.sh
+idf.py build
+python -m esptool --chip esp32 -p /dev/ttyUSB1 -b 115200 \
+    --before default_reset --after hard_reset \
+    write_flash 0x10000 build/thermal-mgmt.bin
+idf.py -p /dev/ttyUSB1 monitor
+\end{lstlisting}
+
+\end{document}

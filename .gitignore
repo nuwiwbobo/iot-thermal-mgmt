@@ -8,6 +8,24 @@ sdkconfig.old
 managed_components/
 dependencies.lock
 
+# LaTeX aux files
+*.aux
+*.out
+*.toc
+*.log
+*.synctex.gz
+
+# Secrets / credentials
+*.json
+!package.json
+!tsconfig.json
+gen-lang-client-*.json
+*Zone.Identifier
+
+# Personal scripts
+create_gdoc.py
+write_report.py
+
 # IDE files
 .vscode/
 .idea/

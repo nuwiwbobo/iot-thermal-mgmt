@@ -27,7 +27,8 @@ static int32_t t_fine;
 #define BMP280_REG_TEMP_MSB    0xFA
 #define BMP280_REG_PRESS_MSB   0xF7
 
-#define BMP280_ID_EXPECTED     0x58
+#define BMP280_ID_BMP280       0x58
+#define BMP280_ID_BME280       0x60
 #define BMP280_SOFT_RESET_CMD  0xB6
 
 static esp_err_t bmp280_read_regs(uint8_t reg, uint8_t* buf, size_t len) {
@@ -88,13 +89,15 @@ void sensor_init(void) {
         return;
     }
 
-    // Verify chip ID
+    // Verify chip ID (accept BMP280=0x58 or BME280=0x60)
     uint8_t id;
-    if (bmp280_read_regs(BMP280_REG_ID, &id, 1) != ESP_OK || id != BMP280_ID_EXPECTED) {
-        ESP_LOGE(TAG, "BMP280 not found (ID=0x%02X)", id);
+    if (bmp280_read_regs(BMP280_REG_ID, &id, 1) != ESP_OK
+        || (id != BMP280_ID_BMP280 && id != BMP280_ID_BME280)) {
+        ESP_LOGE(TAG, "BMP280/BME280 not found (ID=0x%02X)", id);
         return;
     }
-    ESP_LOGI(TAG, "BMP280 found (ID=0x%02X)", id);
+    const char* name = (id == BMP280_ID_BME280) ? "BME280" : "BMP280";
+    ESP_LOGI(TAG, "%s found (ID=0x%02X)", name, id);
 
     // Read calibration data
     if (!read_calibration()) {
