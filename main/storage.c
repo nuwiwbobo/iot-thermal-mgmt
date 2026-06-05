@@ -42,7 +42,7 @@ int storage_get_all(log_entry_t* buf, int max) {
 }
 
 int storage_get_csv(char* buf, int max_len) {
-    int pos = snprintf(buf, max_len, "Sample, Timestamp_ms, Temp_C, Fan_PWM, Mode, Setpoint\n");
+    int pos = snprintf(buf, max_len, "Sample, Timestamp_ms, Temp_C, Fan_Pct, Mode, Setpoint\n");
     int start = (ring_head - ring_count + LOG_RING_SIZE) % LOG_RING_SIZE;
     for (int i = 0; i < ring_count && pos < max_len - 80; i++) {
         log_entry_t* e = &ring[(start + i) % LOG_RING_SIZE];

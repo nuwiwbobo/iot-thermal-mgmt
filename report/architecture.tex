@@ -81,7 +81,7 @@ Tujuan praktis: menjadi \emph{learning material} bagi siapa saja yang ingin mema
 
 Sistem manajemen termal aktif berbasis ESP32 yang:
 \begin{itemize}
-    \item Membaca suhu lingkungan via sensor digital \textbf{BMP280} (I2C).
+    \item Membaca suhu lingkungan via sensor digital \textbf{BMP280} atau \textbf{BME280} (I2C).
     \item Mengontrol kecepatan kipas 12V DC via driver \textbf{L298N} dengan PWM LEDC.
     \item Beroperasi dalam dua mode: \textbf{AUTO} (proportional control terhadap setpoint) dan \textbf{MANUAL} (PWM langsung).
     \item Kontrol diberikan melalui \textbf{web dashboard} (REST API) dan dua \textbf{tombol fisik} (GPIO).
@@ -138,7 +138,7 @@ Tiga timer:
 \midrule
 \texttt{timer\_read\_temp} & 50\,ms & Baca BMP280, simpan ke \texttt{g\_temp\_c} \\
 \texttt{timer\_scan\_buttons} & 100\,ms & Polling tombol, panggil callback \\
-\texttt{timer\_control\_fan} & 200\,ms & Hitung PID, set PWM, push log \\
+\texttt{timer\_control\_fan} & 200\,ms & Hitung P-only, set PWM, push log \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -215,11 +215,11 @@ void app_main(void)
     \item \texttt{vTaskDelay(10\,ms)} memberi \emph{yield} agar task idle FreeRTOS dapat berjalan; konsumsi CPU turun ke $\sim$0\% saat idle.
 \end{itemize}
 
-\subsection{\texttt{sensor.c} --- Driver BMP280 via I2C}
+\subsection{\texttt{sensor.c} --- Driver BMP280/BME280 via I2C}
 
-BMP280 diakses melalui bus I2C. Register-register penting:
+BMP280 dan BME280 (register-compatible untuk suhu) diakses melalui bus I2C. Register-register penting:
 \begin{itemize}
-    \item \textbf{0xD0} \texttt{ID} --- chip ID, harus 0x58.
+    \item \textbf{0xD0} \texttt{ID} --- chip ID, 0x58 (BMP280) atau 0x60 (BME280); firmware menerima keduanya.
     \item \textbf{0x88--0x8D} \texttt{calib00..05} --- koefisien kalibrasi suhu (dig\_T1--T3).
     \item \textbf{0x8E--0x9F} \texttt{calib06..17} --- koefisien kalibrasi tekanan (dig\_P1--P9).
     \item \textbf{0xF4} \texttt{ctrl\_meas} --- konfigurasi oversampling dan mode.
@@ -246,7 +246,7 @@ i2c_master_bus_add_device(bus_handle, &dev_config, &bmp280_dev);
 \end{lstlisting}
 
 \paragraph{Transaksi baca bertingkat (repeated start).}
-BMP280 butuh pola ``tulis alamat register, lalu baca 6 byte data''. API baru menyediakan \texttt{i2c\_master\_transmit\_receive} yang melakukan ini dalam satu transaksi (efisien).
+Sensor butuh pola ``tulis alamat register, lalu baca 6 byte data''. API baru menyediakan \texttt{i2c\_master\_transmit\_receive} yang melakukan ini dalam satu transaksi (efisien).
 
 \begin{lstlisting}[caption={Pembacaan suhu + tekanan}]{}
 uint8_t buf[6];
@@ -363,7 +363,7 @@ POST & \texttt{/api/log/clear} & Reset log \\
 \paragraph{Finite state machine WiFi.}
 \begin{itemize}
     \item \texttt{WIFI\_MODE\_APSTA} --- mencoba STA terlebih dahulu.
-    \item Jika STA gagal dalam 10\,s, \texttt{esp\_wifi\_set\_mode(WIFI\_MODE\_AP)} dan hidupkan AP \texttt{ThermalCtrl-AP}.
+    \item Mode default \texttt{WIFI\_MODE\_APSTA}: mencoba STA terlebih dahulu sambil AP tetap aktif.
     \item Periodic reconnect setiap 30\,s (\texttt{network\_poll}).
 \end{itemize}
 
@@ -433,9 +433,9 @@ compensate_temp(adc_T)                              |
   |                                                 |
   v                                                 |
 g_temp_c (RAM global) ------ 200ms timer ----->  actuator_compute()
-                                                  |  safety + PID
+                                                  |  safety + P-only
                                                   v
-                                            g_fan_pwm  --  LEDC PWM --> L298N ENA
+                                             g_fan_pwm  --  LEDC PWM --> L298N ENA
                                                   |            --> DC Fan
                                                   |
                                             storage_push() --> ring[100]
@@ -475,7 +475,7 @@ Bagian ini memetakan setiap \emph{evaluation point} pada \emph{Project Guideline
 \toprule
 \textbf{Kandidat} & \textbf{Kelebihan} & \textbf{Alasan dipilih/ditolak} \\
 \midrule
-\textbf{BMP280} & I2C, digital, $\pm$1$^{\circ}$C & \textbf{ Dipilih} \\
+\textbf{BMP280/BME280} & I2C, digital, $\pm$1$^{\circ}$C, kompensasi Bosch built-in & \textbf{Dipilih} \\
 DHT22          & murah, +humidity & 1-wire, 2\,s latency, $\pm$0.5$^{\circ}$C tapi \emph{integer} \\
 DS18B20        & 1-wire, $\pm$0.5$^{\circ}$C & perlu protokol proprietary, pin banyak \\
 LM35           & analog, $\sim$\$1 & rentan noise dari motor \\
@@ -483,7 +483,7 @@ LM35           & analog, $\sim$\$1 & rentan noise dari motor \\
 \end{tabular}
 \end{center}
 
-Alasan BMP280: digital (kebal noise), I2C 2-wire (hemat pin), built-in kompensasi, dan modul murah $\sim\$3$.
+Alasan BMP280/BME280: digital (kebal noise), I2C 2-wire (hemat pin), built-in kompensasi, modul murah $\sim\$3$, dan firmware mengenali kedua varian melalui chip ID (0x58 / 0x60).
 
 Untuk aktuator, L298N dipilih karena:
 \begin{itemize}
@@ -497,7 +497,7 @@ Untuk aktuator, L298N dipilih karena:
 
 Lihat diagram blok di Bagian 3.1. Ringkasan:
 \begin{itemize}
-    \item \textbf{Data plane}: BMP280 $\rightarrow$ I2C $\rightarrow$ ESP32 $\rightarrow$ PWM $\rightarrow$ L298N $\rightarrow$ Fan.
+    \item \textbf{Data plane}: sensor (BMP280/BME280) $\rightarrow$ I2C $\rightarrow$ ESP32 $\rightarrow$ PWM $\rightarrow$ L298N $\rightarrow$ Fan.
     \item \textbf{Control plane}: Web browser $\leftrightarrow$ WiFi $\leftrightarrow$ HTTP REST $\leftrightarrow$ ESP32. Tombol fisik $\rightarrow$ GPIO $\rightarrow$ ESP32.
     \item \textbf{Power plane}: 3S Li-ion $\rightarrow$ BMS $\rightarrow$ L298N VS $\rightarrow$ 5V regulator $\rightarrow$ ESP32.
 \end{itemize}
@@ -509,8 +509,8 @@ Lihat diagram blok di Bagian 3.1. Ringkasan:
 \toprule
 \textbf{Pin} & \textbf{Alasan} & \textbf{Catatan} \\
 \midrule
-GPIO21 (SDA) & \emph{default} I2C0 SDA & hardware pull-up 4.7\,k$\Omega$ \\
-GPIO22 (SCL) & \emph{default} I2C0 SCL & hardware pull-up 4.7\,k$\Omega$ \\
+GPIO21 (SDA) & \emph{default} I2C0 SDA & internal pull-up firmware-enabled ($\sim$45\,k$\Omega$, cukup untuk breadboard pendek; tambah 4.7\,k$\Omega$ eksternal untuk kabel panjang) \\
+GPIO22 (SCL) & \emph{default} I2C0 SCL & internal pull-up firmware-enabled ($\sim$45\,k$\Omega$, sama seperti SDA) \\
 GPIO16 (ENA) & PWM-capable, \emph{not strapping} & LEDC channel 0 \\
 GPIO17 (IN1) & GPIO biasa, \emph{not strapping} & fixed HIGH \\
 GPIO18 (IN2) & GPIO biasa, \emph{not strapping} & fixed LOW \\
@@ -538,7 +538,7 @@ Fan inrush current & Soft-start ramp 200 step/s. L298N rated 2A (margin 4$\times
 \addlinespace
 Flyback voltage (motor induktif) & L298N \emph{built-in} clamping diodes. \\
 \addlinespace
-I2C noise dari motor & Digital I2C \emph{immune} terhadap EMI; pull-up 4.7\,k$\Omega$. \\
+I2C noise dari motor & Digital I2C \emph{immune} terhadap EMI; pull-up internal ESP32 ($\sim$45\,k$\Omega$) memadai untuk breadboard, tambahkan 4.7\,k$\Omega$ eksternal untuk produksi. \\
 \addlinespace
 WiFi disconnect & Reconnect timer 30\,s. Tombol fisik tetap berfungsi offline. \\
 \addlinespace
@@ -548,7 +548,7 @@ Thermal runaway (kegagalan sensor) & Override 100\% pada $>$60$^{\circ}$C, shutd
 \addlinespace
 Real-time requirement & ESP timer callback deterministik; \emph{no blocking delay} di ISR/kontrol. \\
 \addlinespace
-Li-ion battery safety & 3S BMS; monitoring tegangan via ADC. Low-battery warning. \\
+Li-ion battery safety & 3S BMS dengan proteksi over-charge/over-discharge bawaan; firmware asumsikan tegangan pack aman saat ESP32 masih menyala (brownout detector ESP32 akan trigger reset otomatis). \\
 \addlinespace
 Button \emph{bounce} & \emph{Software debounce} 50\,ms + long-press detection. \\
 \bottomrule
@@ -584,7 +584,7 @@ Informasi yang diekstrak dari data log:
 \subsection{Point 8: Konstruksi/Pengoperasian Hardware}
 
 \begin{itemize}
-    \item \textbf{Konstruksi}: ESP32 DevKit, BMP280 modul, L298N board, 12V DC fan, 2 push buttons, 3S Li-ion + BMS, breadboard + jumper.
+    \item \textbf{Konstruksi}: ESP32 DevKit, BMP280 atau BME280 modul, L298N board, 12V DC fan, 2 push buttons, 3S Li-ion + BMS, breadboard + jumper.
     \item \textbf{Operasional}: nyalakan sistem $\rightarrow$ sambungkan WiFi \texttt{ThermalCtrl-AP} $\rightarrow$ buka \texttt{192.168.4.1} $\rightarrow$ dashboard live.
     \item \textbf{Indikator sukses}: LED pada ESP32 berkedip (WiFi activity), fan berputar, dashboard menampilkan nilai suhu yang berubah saat disentuh/dipanaskan.
 \end{itemize}
@@ -616,7 +616,7 @@ Informasi yang diekstrak dari data log:
 
 Proyek ini mendemonstrasikan implementasi lengkap sistem embedded berbasis ESP32 dengan:
 \begin{itemize}
-    \item Sensor digital I2C (BMP280) dengan kompensasi firmware.
+    \item Sensor digital I2C (BMP280/BME280) dengan kompensasi firmware.
     \item Aktuator PWM (L298N) dengan hukum kontrol P + \emph{hysteresis} + \emph{ramping}.
     \item Antarmuka ganda: tombol fisik + web dashboard.
     \item Logging persisten dengan format CSV dan GNUplot.
@@ -642,8 +642,8 @@ thermal-mgmt/
     CMakeLists.txt        # Lists main.c, sensor.c, actuator.c, ...
     config.h              # All constants: pins, timing, thresholds
     main.c                # app_main, 3 ESP timers, super-loop
-    sensor.c / .h         # BMP280 I2C driver + compensation
-    actuator.c / .h       # L298N LEDC PWM + PID + ramping
+    sensor.c / .h         # BMP280/BME280 I2C driver + compensation
+    actuator.c / .h       # L298N LEDC PWM + P-only + ramping
     input.c / .h          # Button debounce + long-press
     network.c / .h        # WiFi + HTTP REST API
     storage.c / .h        # Ring buffer + LittleFS CSV log
