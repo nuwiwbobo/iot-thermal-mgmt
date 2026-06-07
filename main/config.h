@@ -51,6 +51,10 @@
 #define LOG_MAX_ENTRIES      512
 #define LOG_FILE             "/log.csv"
 
+// ===== Cloud Upload (Google Sheets via Apps Script) =====
+#define CLOUD_URL            ""        // Paste your Apps Script web app URL here
+#define CLOUD_UPLOAD_MS      30000     // 30s between uploads
+
 // ===== Button =====
 #define DEBOUNCE_MS          50
 #define LONG_PRESS_MS        500

@@ -3,6 +3,7 @@
 #include "dashboard.h"
 #include "actuator.h"
 #include "storage.h"
+#include "cloud.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
@@ -29,13 +30,18 @@ static esp_err_t root_handler(httpd_req_t* req) {
 }
 
 static esp_err_t api_status_handler(httpd_req_t* req) {
-    char buf[256];
+    char buf[384];
     int64_t uptime_us = esp_timer_get_time();
+    int64_t cloud_age_s = (cloud_last_upload_ms() == 0) ? -1
+        : (int64_t)((uptime_us / 1000 - cloud_last_upload_ms()) / 1000);
     snprintf(buf, sizeof(buf),
         "{\"temp\":%.1f,\"fan\":%u,\"mode\":%d,\"setpoint\":%.1f,"
-        "\"wifi\":\"%s\",\"uptime\":%lld}",
+        "\"wifi\":\"%s\",\"uptime\":%lld,"
+        "\"cloud\":{\"ok\":%d,\"fail\":%d,\"age_s\":%lld}}",
         g_temp_c, g_fan_pwm * 100 / PWM_MAX, g_mode, g_setpoint,
-        network_get_mode_str(), (long long)(uptime_us / 1000000));
+        network_get_mode_str(), (long long)(uptime_us / 1000000),
+        cloud_get_ok_count(), cloud_get_fail_count(),
+        (long long)cloud_age_s);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, strlen(buf));
     return ESP_OK;
@@ -208,6 +214,7 @@ void network_poll(void) {
 }
 
 bool network_is_connected(void) { return sta_connected || ap_active; }
+bool network_is_sta_connected(void) { return sta_connected; }
 const char* network_get_mode_str(void) {
     if (sta_connected) return "STA";
     if (ap_active) return "AP";

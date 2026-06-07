@@ -4,6 +4,7 @@
 #include "input.h"
 #include "network.h"
 #include "storage.h"
+#include "cloud.h"
 #include "config.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -78,13 +79,22 @@ static void timer_control_fan(void* arg) {
     }
 }
 
+static void timer_cloud_upload(void* arg) {
+    if (!network_is_sta_connected()) return;  // No internet, skip silently
+    log_entry_t entry;
+    if (storage_get_latest(&entry)) {
+        cloud_upload(&entry);
+    }
+}
+
 void app_main(void) {
     sensor_init();
     actuator_init();
     input_init(on_button);
     storage_init();
+    cloud_init();
 
-    esp_timer_handle_t timer_temp, timer_btn, timer_fan;
+    esp_timer_handle_t timer_temp, timer_btn, timer_fan, timer_cloud;
 
     esp_timer_create_args_t temp_args = {
         .callback = timer_read_temp,
@@ -106,6 +116,13 @@ void app_main(void) {
     };
     esp_timer_create(&fan_args, &timer_fan);
     esp_timer_start_periodic(timer_fan, FAN_CTRL_MS * 1000);
+
+    esp_timer_create_args_t cloud_args = {
+        .callback = timer_cloud_upload,
+        .name = "cloud_upload"
+    };
+    esp_timer_create(&cloud_args, &timer_cloud);
+    esp_timer_start_periodic(timer_cloud, CLOUD_UPLOAD_MS * 1000);
 
     network_init();
 

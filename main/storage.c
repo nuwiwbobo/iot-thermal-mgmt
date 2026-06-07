@@ -41,6 +41,13 @@ int storage_get_all(log_entry_t* buf, int max) {
     return count;
 }
 
+bool storage_get_latest(log_entry_t *out) {
+    if (!out || ring_count == 0) return false;
+    int idx = (ring_head - 1 + LOG_RING_SIZE) % LOG_RING_SIZE;
+    *out = ring[idx];
+    return true;
+}
+
 int storage_get_csv(char* buf, int max_len) {
     int pos = snprintf(buf, max_len, "Sample, Timestamp_ms, Temp_C, Fan_Pct, Mode, Setpoint\n");
     int start = (ring_head - ring_count + LOG_RING_SIZE) % LOG_RING_SIZE;

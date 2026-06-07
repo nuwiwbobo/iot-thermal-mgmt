@@ -16,6 +16,7 @@ typedef struct {
 void storage_init(void);
 void storage_push(log_entry_t* entry);
 int storage_get_all(log_entry_t* buf, int max);
+bool storage_get_latest(log_entry_t* out);
 int storage_get_csv(char* buf, int max_len);
 int storage_get_plt(char* buf, int max_len);
 void storage_clear(void);

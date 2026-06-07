@@ -86,6 +86,7 @@ Sistem manajemen termal aktif berbasis ESP32 yang:
     \item Beroperasi dalam dua mode: \textbf{AUTO} (proportional control terhadap setpoint) dan \textbf{MANUAL} (PWM langsung).
     \item Kontrol diberikan melalui \textbf{web dashboard} (REST API) dan dua \textbf{tombol fisik} (GPIO).
     \item Mencatat log ke \textbf{LittleFS} dalam format CSV dan skrip GNUplot.
+    \item Mengunggah data periodik ke \textbf{Google Sheets} via Apps Script Web App untuk monitoring jarak jauh.
     \item Menyediakan \emph{live graph} pada dashboard (canvas HTML, tanpa dependensi CDN).
 \end{itemize}
 
@@ -139,6 +140,7 @@ Tiga timer:
 \texttt{timer\_read\_temp} & 50\,ms & Baca BMP280, simpan ke \texttt{g\_temp\_c} \\
 \texttt{timer\_scan\_buttons} & 100\,ms & Polling tombol, panggil callback \\
 \texttt{timer\_control\_fan} & 200\,ms & Hitung P-only, set PWM, push log \\
+\texttt{timer\_cloud\_upload} & 30\,s & POST sample terbaru ke Google Sheets (jika STA connected) \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -381,6 +383,58 @@ Format CSV:
 Sample, Timestamp_ms, Temp_C, Fan_Pct, Mode, Setpoint
 42, 8400, 28.5, 35, AUTO, 30.0
 \end{verbatim}
+
+% ============================================================
+\subsection{\texttt{cloud.c} --- Upload ke Google Sheets}
+% ============================================================
+
+Modul \texttt{cloud} mengirim sample terbaru ke \textbf{Google Sheets} via \textbf{Apps Script Web App} setiap 30 detik (atau sesuai \texttt{CLOUD\_UPLOAD\_MS}). Pendekatan ini dipilih karena:
+\begin{itemize}
+    \item \textbf{Gratis} dan tanpa server middleware --- Apps Script dan Google Sheets berada di infrastruktur Google.
+    \item \textbf{Real-time dashboard} --- cukup buka spreadsheet dari mana saja untuk monitoring.
+    \item \textbf{History otomatis} --- tidak perlu download manual atau khawatir flash ESP32 penuh.
+    \item \textbf{Alert-ready} --- Apps Script bisa di-\emph{trigger} untuk kirim email/Telegram jika nilai di luar ambang batas.
+\end{itemize}
+
+\paragraph{Alur kerja.}
+\begin{enumerate}
+    \item ESP32, ketika STA connected ke router dengan internet, mengirim \texttt{POST} ke URL Apps Script dengan JSON body:
+    \begin{lstlisting}[caption={Contoh JSON body yang dikirim ESP32}]
+{"sample":42,"temp":28.5,"fan":31,"mode":"AUTO","setpoint":30.0}
+    \end{lstlisting}
+    \item Apps Script menerima \texttt{doPost(e)}, parse JSON, dan \texttt{appendRow} ke spreadsheet.
+    \item Apps Script mengembalikan HTTP 200 + \texttt{\{"ok":true\}}.
+    \item ESP32 mencatat timestamp sukses di \texttt{last\_upload\_ms}.
+\end{enumerate}
+
+\paragraph{Kode Apps Script (server-side).}
+\begin{lstlisting}[language=JavaScript,caption={Apps Script \texttt{doPost} handler}]
+function doPost(e) {
+  const sheet = SpreadsheetApp
+    .getActiveSpreadsheet().getActiveSheet();
+  const d = JSON.parse(e.postData.contents);
+  sheet.appendRow([
+    new Date(),
+    d.sample, d.temp, d.fan, d.mode, d.setpoint
+  ]);
+  return ContentService
+    .createTextOutput(JSON.stringify({ok: true}))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+\end{lstlisting}
+
+\paragraph{Verifikasi HTTPS dan sertifikat.}
+ESP-IDF HTTP client mengirim ke \texttt{script.google.com} via HTTPS. Untuk capstone, \texttt{cert\_pem} dibiarkan kosong sehingga \emph{certificate verification} di-skip (akseptabel karena URL Apps Script di-hardcode di \texttt{config.h}). Untuk produksi, embed ISRG Root X1 (~1.4\,KB) di \texttt{cert\_pem}.
+
+\paragraph{Batasan Gmail quota.}
+Akun gratis punya \textbf{90 menit Apps Script execution/hari}. Dengan interval 30\,s = 2880 upload/hari $\approx$ 80 menit. Mendekati limit --- pertimbangkan naikkan interval ke 60\,s untuk safety margin, atau gunakan akun Google Workspace.
+
+\paragraph{Status reporting.}
+Endpoint \texttt{/api/status} JSON sekarang memuat blok \texttt{cloud}:
+\begin{lstlisting}[caption={Tambahan field \texttt{cloud} di \texttt{/api/status}}]
+"cloud":{"ok":42,"fail":1,"age_s":28}
+\end{lstlisting}
+Artinya: 42 upload berhasil, 1 gagal, upload terakhir 28 detik yang lalu.
 
 % ============================================================
 \section{Dashboard Web (\texttt{dashboard.h})}
@@ -647,6 +701,7 @@ thermal-mgmt/
     input.c / .h          # Button debounce + long-press
     network.c / .h        # WiFi + HTTP REST API
     storage.c / .h        # Ring buffer + LittleFS CSV log
+    cloud.c / .h          # Google Sheets upload via Apps Script
     dashboard.h           # Embedded HTML+CSS+JS (zero-dep)
 \end{lstlisting}
 
