@@ -53,7 +53,7 @@
 
 // ===== Cloud Upload (Google Sheets via Apps Script) =====
 #define CLOUD_URL            "https://script.google.com/macros/s/AKfycbyHPJQBr3L04ZIFWRBOCTaIvbONiBZM8uMsAF8RfqeiZSkojhrwf_KChDXt98r0_sBKlw/exec"
-#define CLOUD_UPLOAD_MS      30000     // 30s between uploads
+#define CLOUD_UPLOAD_MS      5000      // 5s between uploads (uses ~3x more Apps Script quota vs 30s)
 
 // ===== Button =====
 #define DEBOUNCE_MS          50
