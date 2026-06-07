@@ -40,8 +40,8 @@
 // ===== WiFi =====
 #define WIFI_AP_SSID         "ThermalCtrl-AP"
 #define WIFI_AP_PASS         "thermal123"
-#define WIFI_STA_SSID        "myssid"
-#define WIFI_STA_PASS        "mypassword"
+#define WIFI_STA_SSID        "TP-Link_4684"
+#define WIFI_STA_PASS        "06410674"
 #define WIFI_TIMEOUT_MS      10000
 #define WIFI_RECONNECT_MS    30000
 
