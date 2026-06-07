@@ -1,6 +1,7 @@
 #include "cloud.h"
 #include "config.h"
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include <string.h>
@@ -45,8 +46,7 @@ void cloud_upload(log_entry_t *entry) {
         .method = HTTP_METHOD_POST,
         .timeout_ms = 8000,
         .keep_alive_enable = false,
-        // No cert_pem -> uses skip-verification. Acceptable for capstone
-        // where we control the URL. For production, embed the ISRG root X1.
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
