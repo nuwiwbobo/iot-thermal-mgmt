@@ -52,7 +52,7 @@
 #define LOG_FILE             "/log.csv"
 
 // ===== Cloud Upload (Google Sheets via Apps Script) =====
-#define CLOUD_URL            ""        // Paste your Apps Script web app URL here
+#define CLOUD_URL            "https://script.google.com/macros/s/AKfycbyHPJQBr3L04ZIFWRBOCTaIvbONiBZM8uMsAF8RfqeiZSkojhrwf_KChDXt98r0_sBKlw/exec"
 #define CLOUD_UPLOAD_MS      30000     // 30s between uploads
 
 // ===== Button =====
