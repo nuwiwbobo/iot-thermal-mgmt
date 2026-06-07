@@ -119,13 +119,33 @@ static esp_err_t api_log_clear_handler(httpd_req_t* req) {
     return ESP_OK;
 }
 
+static const char* wifi_reason_str(uint8_t reason) {
+    switch (reason) {
+        case 2:  return "AUTH_EXPIRE - password wrong or expired";
+        case 4:  return "AUTH_FAIL - password wrong";
+        case 7:  return "NO_AP_FOUND - SSID not found / out of range";
+        case 8:  return "ASSOC_FAIL - association failed";
+        case 15: return "4WAY_HANDSHAKE_TIMEOUT - password wrong";
+        case 201: return "NO_AP_FOUND_W_COMPATIBLE_SECURITY - WPA mismatch";
+        case 202: return "NO_AP_FOUND_IN_AUTHMODE_THRESHOLD - auth mode mismatch";
+        case 203: return "NO_AP_FOUND_IN_RSSI_THRESHOLD - signal too weak";
+        case 204: return "NO_AP_FOUND_IN_SCAN_THRESHOLD";
+        case 205: return "NO_AP_FOUND_WITH_RSSI_AND_AUTHMODE";
+        default: return "OTHER";
+    }
+}
+
 static void wifi_event_handler(void* arg, esp_event_base_t base,
                                 int32_t id, void* data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        ESP_LOGI(TAG, "STA: trying to connect to SSID='%s' with %d-char password",
+                 WIFI_STA_SSID, (int)strlen(WIFI_STA_PASS));
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         sta_connected = false;
-        ESP_LOGI(TAG, "STA disconnected, will retry...");
+        wifi_event_sta_disconnected_t *dis = (wifi_event_sta_disconnected_t*)data;
+        ESP_LOGW(TAG, "STA disconnected: reason %d (%s)",
+                 dis->reason, wifi_reason_str(dis->reason));
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*)data;
         sta_connected = true;
